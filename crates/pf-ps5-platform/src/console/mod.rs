@@ -52,9 +52,7 @@ fn entry() -> ash::Entry {
     ) -> ash::vk::PFN_vkVoidFunction {
         use ash::vk::Handle as _;
         // SAFETY: forwards Vulkan's own contract: `name` is NUL-terminated, `instance` null or live.
-        let f = unsafe { pf_ps5_sys::vk::vk_icdGetInstanceProcAddr(instance.as_raw() as *mut _, name) };
-        // SAFETY: both are `Option<unsafe extern "system" fn()>`.
-        unsafe { std::mem::transmute::<pf_ps5_sys::vk::PFN_vkVoidFunction, ash::vk::PFN_vkVoidFunction>(f) }
+        unsafe { pf_ps5_sys::vk::vk_icdGetInstanceProcAddr(instance.as_raw() as *mut _, name) }
     }
     // SAFETY: `gipa` resolves every global and instance command, as a loader would.
     unsafe {
@@ -64,7 +62,7 @@ fn entry() -> ash::Entry {
     }
 }
 
-/// PyroWave on the GPU, H.264/HEVC through Videodec2.
+/// `PyroWave` on the GPU, H.264/HEVC through `Videodec2`.
 struct Ps5Video {
     pyro: PyroLane,
     vd2: videodec2::Vd2Lane,

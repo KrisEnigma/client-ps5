@@ -1288,6 +1288,7 @@ dependencies = [
  "pf-ps5-platform",
  "pf-ps5-probe",
  "pf-ps5-sys",
+ "skia-safe",
 ]
 
 [[package]]

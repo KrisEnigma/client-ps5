@@ -12,12 +12,34 @@ vars:
 tasks:
   image:
     desc: Build the toolchain image
-    cmds: [docker build -t {{.IMAGE}} -f docker/Dockerfile docker]
+    cmds:
+      - docker build -t {{.IMAGE}} -f docker/Dockerfile docker
 
-  toolchain: { deps: [image], cmds: ['{{.RUN}} task toolchain'] }
-  test: { deps: [image], cmds: ['{{.RUN}} task test'] }
-  lint: { deps: [image], cmds: ['{{.RUN}} task lint'] }
-  cross-check: { deps: [image], cmds: ['{{.RUN}} task cross-check'] }
-  skia: { deps: [image], cmds: ['{{.RUN}} task skia'] }
-  package: { deps: [image], cmds: ['{{.RUN}} task package'] }
-  package-probe: { deps: [image], cmds: ['{{.RUN}} task package-probe'] }
+  toolchain:
+    deps: [image]
+    cmds:
+      - '{{.RUN}} task toolchain'
+  test:
+    deps: [image]
+    cmds:
+      - '{{.RUN}} task test'
+  lint:
+    deps: [image]
+    cmds:
+      - '{{.RUN}} task lint'
+  cross-check:
+    deps: [image]
+    cmds:
+      - '{{.RUN}} task cross-check'
+  skia:
+    deps: [image]
+    cmds:
+      - '{{.RUN}} task skia'
+  package:
+    deps: [image]
+    cmds:
+      - '{{.RUN}} task package'
+  package-probe:
+    deps: [image]
+    cmds:
+      - '{{.RUN}} task package-probe'

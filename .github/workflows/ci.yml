@@ -17,7 +17,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Packages
-        run: sudo apt-get update && sudo apt-get install -y cmake clang libclang-dev pkg-config libopus-dev mesa-vulkan-drivers libvulkan1
+        run: sudo apt-get update && sudo apt-get install -y cmake clang libclang-dev pkg-config libopus-dev libfreetype-dev libfontconfig1-dev mesa-vulkan-drivers libvulkan1
       - uses: Swatinem/rust-cache@v2
       - name: Format
         run: cargo fmt --all --check
@@ -47,6 +47,8 @@ jobs:
           key: toolchains-${{ hashFiles('scripts/pins.env') }}
       - name: Toolchain
         run: docker run --rm -v "$PWD:/w" -w /w punktfunk-ps5-toolchain:1 task toolchain
+      - name: Skia for the console
+        run: docker run --rm -v "$PWD:/w" -w /w punktfunk-ps5-toolchain:1 task skia
       - name: Cross clippy
         run: docker run --rm -v "$PWD:/w" -w /w punktfunk-ps5-toolchain:1 task cross-lint
       - name: Package

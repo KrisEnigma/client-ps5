@@ -11,7 +11,7 @@ publish = false
 [features]
 # Skia's Vulkan backend for the UI layer, on the shared device. Off by default: a Skia archive
 # with `vulkan` is built for the PS5 (scripts/build-skia.sh); elsewhere the UI rasters on the CPU.
-skia-vulkan = ["skia-safe/vulkan"]
+skia-vulkan = ["skia-safe/vulkan", "skia-safe/ganesh"]
 
 [dependencies]
 anyhow.workspace = true

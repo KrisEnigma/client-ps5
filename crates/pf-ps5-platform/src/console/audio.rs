@@ -1,4 +1,4 @@
-//! AudioOut: a MAIN port at 48 kHz, S16 (the format console titles have proven), one 256-frame
+//! `AudioOut`: a MAIN port at 48 kHz, S16 (the format console titles have proven), one 256-frame
 //! grain per blocking write.
 
 use anyhow::{bail, Result};

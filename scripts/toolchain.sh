@@ -46,4 +46,8 @@ echo "==> ps5-native-tool"
 echo "==> libc.prx $(sha256sum "$vk/runtime/libc.prx" | cut -c1-12)"
 
 rustup toolchain install "$RUST_NIGHTLY" --profile minimal --component rust-src,rustfmt,clippy
+# std reads FreeBSD 12's 64-bit inode numbers; the console's FreeBSD 11 libc has 32-bit ones.
+std_fs="$(rustc "+$RUST_NIGHTLY" --print sysroot)/lib/rustlib/src/rust/library/std/src/sys/fs/unix.rs"
+sed -i 's/d_ino: (\*entry_ptr).d_fileno,/d_ino: (*entry_ptr).d_fileno as u64,/' "$std_fs"
+grep -q 'd_ino: (\*entry_ptr).d_fileno as u64,' "$std_fs" || { echo "std's dirent patch did not apply" >&2; exit 1; }
 echo "==> rust $RUST_NIGHTLY"

@@ -1,4 +1,4 @@
-//! Pads through UserService and scePad: one handle per signed-in user, re-scanned once a second.
+//! Pads through `UserService` and `scePad`: one handle per signed-in user, re-scanned once a second.
 
 use std::time::{Duration, Instant};
 

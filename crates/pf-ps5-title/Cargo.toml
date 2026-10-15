@@ -1,0 +1,28 @@
+[package]
+name = "pf-ps5-title"
+description = "The PS5 title as a static library: the C `main` the payload SDK's CRT calls. scripts/link-title.sh links it with RADV into eboot.bin."
+version = "0.0.1"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[lib]
+crate-type = ["staticlib"]
+
+[features]
+# Link the WP0 probe instead of the client.
+probe = ["dep:pf-ps5-probe"]
+
+[dependencies]
+pf-ps5-app = { path = "../pf-ps5-app" }
+pf-ps5-sys = { path = "../pf-ps5-sys" }
+pf-ps5-probe = { path = "../pf-ps5-probe", optional = true }
+libc = "0.2"
+
+[target.'cfg(target_vendor = "sie")'.dependencies]
+pf-ps5-platform = { path = "../pf-ps5-platform" }
+
+[lints]
+workspace = true

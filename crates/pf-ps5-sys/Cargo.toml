@@ -1,0 +1,19 @@
+[package]
+name = "pf-ps5-sys"
+description = "Hand-written FFI to the console's C ABI (Pad, UserService, AudioOut, SystemService, Sysmodule, kernel memory, Videodec2, libSceNet, the RADV entry point) and the few shims std needs there."
+version = "0.0.1"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[dependencies]
+libc = "0.2"
+
+[target.'cfg(target_vendor = "sie")'.dependencies]
+# The custom entropy backend std's dependents reach through `getrandom_backend="custom"`.
+getrandom = { version = "0.4", features = [] }
+
+[lints]
+workspace = true

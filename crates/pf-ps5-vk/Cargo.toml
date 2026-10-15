@@ -1,0 +1,30 @@
+[package]
+name = "pf-ps5-vk"
+description = "The PS5 client's Vulkan plane: one device for the title's life, the presenter (stream picture + UI layer → swapchain), the PyroWave lane and read-back."
+version = "0.0.1"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[features]
+# Skia's Vulkan backend for the UI layer, on the shared device. Off by default: a Skia archive
+# with `vulkan` is built for the PS5 (scripts/build-skia.sh); elsewhere the UI rasters on the CPU.
+skia-vulkan = ["skia-safe/vulkan"]
+
+[dependencies]
+anyhow.workspace = true
+tracing.workspace = true
+ash.workspace = true
+skia-safe.workspace = true
+punktfunk-core.workspace = true
+pf-ps5-app = { path = "../pf-ps5-app" }
+
+# The shared decoder and CSC shaders. pf-client-video builds on Linux and, with the upstream
+# target change (plan §7.3), on the PS5.
+[target.'cfg(any(target_os = "linux", target_vendor = "sie"))'.dependencies]
+pf-client-video.workspace = true
+
+[lints]
+workspace = true

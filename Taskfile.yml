@@ -1,0 +1,103 @@
+# Bare tasks run natively (CI, a Linux box with the toolchain); docker:* runs the same in the
+# toolchain image. Console tasks read PS5_HOST and TITLE_ID from a gitignored .env (.env.example).
+version: '3'
+
+silent: true
+
+dotenv: ['.env']
+
+env:
+  # libopus via cmake (audiopus_sys) still declares an old minimum.
+  CMAKE_POLICY_VERSION_MINIMUM: '3.5'
+
+includes:
+  docker:
+    taskfile: ./taskfiles/docker.yml
+
+vars:
+  TITLE_ID: '{{.TITLE_ID | default "PPSA99724"}}'
+  PKG_VERSION:
+    sh: |
+      if [ -n "${PKG_VERSION:-}" ]; then echo "$PKG_VERSION"; else
+        LATEST=$(git describe --tags --abbrev=0 --match 'v[0-9]*' 2>/dev/null | sed 's/^v//' || echo 0.0.1)
+        SHA=$(git rev-parse --short=8 HEAD 2>/dev/null || echo unknown)
+        echo "${LATEST}+git.${SHA}"
+      fi
+
+tasks:
+  check:
+    desc: cargo check on this box (the app, the host platform, the probe)
+    cmds: [cargo check --workspace --all-targets]
+
+  test:
+    desc: Every test this box can run (fakes everywhere; Vulkan and PyroWave on Linux)
+    cmds: [cargo test --workspace]
+
+  lint:
+    desc: rustfmt and clippy -D warnings, as CI runs them
+    cmds:
+      - cargo fmt --all --check
+      - cargo clippy --workspace --all-targets -- -D warnings
+
+  run:
+    desc: The client on this box (PF_PS5_DATA, PF_PS5_SIZE, PF_PS5_PADS)
+    cmds: [cargo run -p pf-ps5 -- {{.CLI_ARGS}}]
+
+  probe:
+    desc: The WP0 probe on this box; reads probe.json in the data dir given
+    cmds: [cargo run -p pf-ps5-probe -- {{.CLI_ARGS}}]
+
+  toolchain:
+    desc: Install the pinned SDK, RADV, title converter, libc.prx and nightly under .toolchains/
+    cmds: [bash scripts/toolchain.sh]
+
+  skia:
+    desc: Build the console's Skia archive from source (once per skia-safe version)
+    cmds: [bash scripts/build-skia.sh]
+
+  cross-check:
+    desc: Type-check the title for the console (the cfg'd-out code a host check never sees)
+    cmds: [bash scripts/cargo-ps5.sh check]
+
+  cross-lint:
+    desc: clippy -D warnings on the console target
+    cmds: [bash scripts/cargo-ps5.sh clippy -- -D warnings]
+
+  build:
+    desc: Build the title's static library for the console
+    env: { PKG_VERSION: '{{.PKG_VERSION}}' }
+    cmds: [bash scripts/cargo-ps5.sh build]
+
+  package:
+    desc: Link and lay out dist/<TITLE_ID>/ (eboot.bin, sce_sys, sce_module)
+    deps: [build]
+    cmds:
+      - bash scripts/link-title.sh target/x86_64-sie-ps5/release/libpf_ps5_title.a {{.TITLE_ID}} punktfunk
+      - cd dist && zip -qr {{.TITLE_ID}}.zip {{.TITLE_ID}} && sha256sum {{.TITLE_ID}}.zip > {{.TITLE_ID}}.zip.sha256
+
+  package-probe:
+    desc: The probe as its own title (TITLE_ID_PROBE, default PPSA99725)
+    vars: { PROBE_ID: '{{.TITLE_ID_PROBE | default "PPSA99725"}}' }
+    cmds:
+      - bash scripts/cargo-ps5.sh build --probe
+      - bash scripts/link-title.sh target/x86_64-sie-ps5/release/libpf_ps5_title.a {{.PROBE_ID}} "punktfunk probe"
+
+  deploy:
+    desc: Upload dist/<TITLE_ID>/ over FTP (TELEMETRY=ip:port streams the log to `nc -lk port`)
+    cmds: [python3 scripts/deploy.py]
+
+  test-run:
+    desc: 'Queue a scripted run: task test-run -- menu | stream HOST [SECONDS]'
+    cmds: [python3 scripts/test-run.py {{.CLI_ARGS}}]
+
+  fetch-bundle:
+    desc: Fetch the newest test-run bundle into bundles/<TITLE_ID>/
+    cmds: [python3 scripts/fetch-bundle.py]
+
+  klog:
+    desc: Stream the console's kernel log (TCP 3232)
+    cmds: [nc {{.PS5_HOST}} 3232]
+
+  symbolize:
+    desc: 'Name a crash log''s frames: task symbolize -- LOG'
+    cmds: [python3 scripts/symbolize.py {{.CLI_ARGS}} dist/{{.TITLE_ID}}.llvm-pie.elf]

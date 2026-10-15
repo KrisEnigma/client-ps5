@@ -1,0 +1,96 @@
+[package]
+name = "pf-ps5"
+description = "PlayStation 5 homebrew client for punktfunk: the title binary."
+version = "0.0.1"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[[bin]]
+name = "pf-ps5"
+path = "src/main.rs"
+
+[dependencies]
+anyhow.workspace = true
+tracing.workspace = true
+pf-ps5-app = { path = "crates/pf-ps5-app" }
+
+[target.'cfg(target_vendor = "sie")'.dependencies]
+pf-ps5-platform = { path = "crates/pf-ps5-platform" }
+
+[target.'cfg(not(target_vendor = "sie"))'.dependencies]
+pf-ps5-host = { path = "crates/pf-ps5-host" }
+
+[lints]
+workspace = true
+
+[workspace]
+resolver = "2"
+members = [
+    "crates/pf-ps5-sys",
+    "crates/pf-ps5-vk",
+    "crates/pf-ps5-platform",
+    "crates/pf-ps5-host",
+    "crates/pf-ps5-app",
+    "crates/pf-ps5-probe",
+    "crates/pf-ps5-title",
+]
+# The title is a static library linked by scripts/link-title.sh for the console only.
+default-members = [
+    ".",
+    "crates/pf-ps5-sys",
+    "crates/pf-ps5-vk",
+    "crates/pf-ps5-platform",
+    "crates/pf-ps5-host",
+    "crates/pf-ps5-app",
+    "crates/pf-ps5-probe",
+]
+
+[workspace.package]
+edition = "2021"
+rust-version = "1.85"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/punktfunk/client-ps5"
+
+[workspace.dependencies]
+anyhow = "1"
+tracing = "0.1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+ash = { version = "0.38", default-features = false, features = ["debug", "std"] }
+# Same Skia as the shared console; only the PS5 build adds the Vulkan backend (pf-ps5-vk).
+skia-safe = { version = "0.153", features = ["textlayout"] }
+# One REV for all three shared crates: a tag and a rev build two copies whose types don't unify.
+punktfunk-core = { git = "https://git.unom.io/unom/punktfunk", rev = "41320556f19035cdc9ece825e951d47c2ec51211", features = ["quic"] }
+pf-client-core = { git = "https://git.unom.io/unom/punktfunk", rev = "41320556f19035cdc9ece825e951d47c2ec51211", default-features = false }
+pf-console-ui = { git = "https://git.unom.io/unom/punktfunk", rev = "41320556f19035cdc9ece825e951d47c2ec51211", default-features = false }
+pf-client-video = { git = "https://git.unom.io/unom/punktfunk", rev = "41320556f19035cdc9ece825e951d47c2ec51211", default-features = false, features = ["pyrowave"] }
+
+[workspace.lints.rust]
+unsafe_op_in_unsafe_fn = "deny"
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(target_vendor, values("sie"))'] }
+
+[workspace.lints.clippy]
+cast_lossless = "warn"
+map_unwrap_or = "warn"
+use_self = "warn"
+doc_markdown = "warn"
+manual_let_else = "warn"
+redundant_closure_for_method_calls = "warn"
+items_after_statements = "warn"
+match_same_arms = "warn"
+format_collect = "warn"
+suspicious_operation_groupings = "warn"
+needless_pass_by_value = "warn"
+redundant_clone = "warn"
+undocumented_unsafe_blocks = "warn"
+
+[profile.release]
+# Fat LTO inlines core's hot paths (AEAD, FEC, QUIC parsing) across crates.
+lto = "fat"
+codegen-units = 1
+# No unwinding across the C boundaries; the panic hook writes the log first.
+panic = "abort"
+debug = "line-tables-only"

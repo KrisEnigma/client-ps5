@@ -1,0 +1,62 @@
+# Every push and PR: lint and test on a Linux runner (fakes, Vulkan on lavapipe, PyroWave),
+# and the title cross-checked for the console with -D warnings, since a host check compiles
+# none of the console's cfg'd code.
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+env:
+  CMAKE_POLICY_VERSION_MINIMUM: '3.5'
+
+jobs:
+  host:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Packages
+        run: sudo apt-get update && sudo apt-get install -y cmake clang libclang-dev pkg-config libopus-dev mesa-vulkan-drivers libvulkan1
+      - uses: Swatinem/rust-cache@v2
+      - name: Format
+        run: cargo fmt --all --check
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
+      - name: Test
+        run: cargo test --workspace
+      - name: Menu frame on lavapipe
+        run: |
+          mkdir -p "$RUNNER_TEMP/ps5" && echo '{"scenario":"menu"}' > "$RUNNER_TEMP/ps5/test-run.json"
+          PF_PS5_DATA="$RUNNER_TEMP/ps5" PF_PS5_SIZE=1280x720 cargo run -q -p pf-ps5
+          grep -q '"ok": true' "$RUNNER_TEMP"/ps5/verdict/*/verdict.json
+      - uses: actions/upload-artifact@v4
+        with:
+          name: host-menu-frame
+          path: ${{ runner.temp }}/ps5/verdict
+
+  console:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Toolchain image
+        run: docker build -t punktfunk-ps5-toolchain:1 -f docker/Dockerfile docker
+      - uses: actions/cache@v4
+        with:
+          path: .toolchains
+          key: toolchains-${{ hashFiles('scripts/pins.env') }}
+      - name: Toolchain
+        run: docker run --rm -v "$PWD:/w" -w /w punktfunk-ps5-toolchain:1 task toolchain
+      - name: Cross clippy
+        run: docker run --rm -v "$PWD:/w" -w /w punktfunk-ps5-toolchain:1 task cross-lint
+      - name: Package
+        run: docker run --rm -v "$PWD:/w" -w /w -e TITLE_ID punktfunk-ps5-toolchain:1 task package
+        env:
+          TITLE_ID: PPSA99724
+      - uses: actions/upload-artifact@v4
+        with:
+          name: title
+          path: |
+            dist/*.zip
+            dist/*.zip.sha256
+            dist/*.llvm-pie.elf

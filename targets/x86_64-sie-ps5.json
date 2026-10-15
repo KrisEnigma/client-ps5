@@ -1,0 +1,32 @@
+{
+  "arch": "x86_64",
+  "cpu": "znver2",
+  "crt-objects-fallback": "false",
+  "data-layout": "e-m:e-p270:32:32-p271:32:32-p272:64:64-i64:64-i128:128-f80:128-n8:16:32:64-S128",
+  "dynamic-linking": true,
+  "has-thread-local": false,
+  "linker": "prospero-clang",
+  "linker-flavor": "gnu-cc",
+  "llvm-target": "x86_64-sie-ps5",
+  "max-atomic-width": 64,
+  "metadata": {
+    "description": "PlayStation 5 homebrew title (FreeBSD 11 ABI, payload SDK)",
+    "host_tools": false,
+    "std": true,
+    "tier": 3
+  },
+  "os": "freebsd",
+  "vendor": "sie",
+  "panic-strategy": "abort",
+  "frame-pointer": "always",
+  "plt-by-default": false,
+  "position-independent-executables": true,
+  "relro-level": "full",
+  "stack-probes": {
+    "kind": "inline"
+  },
+  "target-family": [
+    "unix"
+  ],
+  "target-pointer-width": 64
+}

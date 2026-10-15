@@ -1,0 +1,23 @@
+# The same tasks inside the toolchain image (docker/Dockerfile), with caches on named volumes.
+version: '3'
+
+vars:
+  IMAGE: punktfunk-ps5-toolchain:1
+  RUN: >-
+    docker run --rm -t -v {{.ROOT_DIR}}:/w -w /w
+    -v pf-ps5-cargo:/usr/local/cargo/registry -v pf-ps5-rustup:/usr/local/rustup
+    -v pf-ps5-target:/w/target -v pf-ps5-toolchains:/w/.toolchains
+    -e PKG_VERSION -e TITLE_ID {{.IMAGE}}
+
+tasks:
+  image:
+    desc: Build the toolchain image
+    cmds: [docker build -t {{.IMAGE}} -f docker/Dockerfile docker]
+
+  toolchain: { deps: [image], cmds: ['{{.RUN}} task toolchain'] }
+  test: { deps: [image], cmds: ['{{.RUN}} task test'] }
+  lint: { deps: [image], cmds: ['{{.RUN}} task lint'] }
+  cross-check: { deps: [image], cmds: ['{{.RUN}} task cross-check'] }
+  skia: { deps: [image], cmds: ['{{.RUN}} task skia'] }
+  package: { deps: [image], cmds: ['{{.RUN}} task package'] }
+  package-probe: { deps: [image], cmds: ['{{.RUN}} task package-probe'] }

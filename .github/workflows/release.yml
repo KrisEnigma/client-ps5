@@ -1,0 +1,40 @@
+# A version tag builds the title and attaches the zip, its checksum and the unstripped ELF (for
+# symbolize.py) to a GitHub release. Binaries ship under MIT OR Apache-2.0 (plan D10), so the
+# tag fails while the link still takes a GPL-3.0-or-later piece (plan WP6).
+name: release
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write
+
+jobs:
+  title:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with: { fetch-depth: 0 }
+      - name: No GPL pieces in the link
+        run: |
+          if grep -n -E 'app_crt\.cpp|app_cpp_runtime\.cpp|radv_link_recipe|runtime/libc\.prx' scripts/link-title.sh; then
+            echo "link-title.sh still links GPL-3.0-or-later code; plan WP6 replaces it first" >&2
+            exit 1
+          fi
+      - name: Toolchain image
+        run: docker build -t punktfunk-ps5-toolchain:1 -f docker/Dockerfile docker
+      - name: Package
+        run: |
+          docker run --rm -v "$PWD:/w" -w /w punktfunk-ps5-toolchain:1 task toolchain
+          docker run --rm -v "$PWD:/w" -w /w -e TITLE_ID -e PKG_VERSION punktfunk-ps5-toolchain:1 task package
+        env:
+          TITLE_ID: ${{ vars.TITLE_ID }}
+          PKG_VERSION: ${{ github.ref_name }}
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/*.zip
+            dist/*.zip.sha256
+            dist/*.llvm-pie.elf
+            THIRD-PARTY-NOTICES.txt

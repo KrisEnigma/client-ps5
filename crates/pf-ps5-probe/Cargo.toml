@@ -1,0 +1,23 @@
+[package]
+name = "pf-ps5-probe"
+description = "WP0's probe: numbered checks of what std, the network stack and punktfunk-core need from the console, then a headless session."
+version = "0.0.1"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[dependencies]
+anyhow.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+punktfunk-core.workspace = true
+pf-ps5-app = { path = "../pf-ps5-app" }
+pf-ps5-sys = { path = "../pf-ps5-sys" }
+quinn-udp = "0.5"
+tokio = { version = "1", features = ["rt-multi-thread", "time"] }
+getrandom02 = { package = "getrandom", version = "0.2" }
+
+[lints]
+workspace = true

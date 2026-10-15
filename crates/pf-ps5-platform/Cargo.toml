@@ -1,0 +1,24 @@
+[package]
+name = "pf-ps5-platform"
+description = "The console's implementations of the PS5 client's seams: the RADV device and presenter, AudioOut, Pad/UserService, the Videodec2 lane, /download0, the title's lifecycle and klog."
+version = "0.0.1"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[dependencies]
+anyhow.workspace = true
+tracing.workspace = true
+punktfunk-core.workspace = true
+pf-ps5-app = { path = "../pf-ps5-app" }
+pf-ps5-sys = { path = "../pf-ps5-sys" }
+
+[target.'cfg(target_vendor = "sie")'.dependencies]
+ash.workspace = true
+pf-ps5-vk = { path = "../pf-ps5-vk", features = ["skia-vulkan"] }
+pf-client-video.workspace = true
+
+[lints]
+workspace = true

@@ -1,0 +1,9 @@
+target/
+target-*/
+dist/
+# Test-run bundles fetched from the console (task fetch-bundle).
+bundles/
+tmp/
+# Fetched by `task toolchain`: the payload SDK, the static RADV and Skia archives.
+.toolchains/
+.env

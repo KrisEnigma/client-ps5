@@ -1,0 +1,23 @@
+[package]
+name = "pf-ps5-host"
+description = "The PS5 client's seams on a developer box: Vulkan offscreen through the system loader (Linux) or CPU raster, a WAV audio sink, scripted pads, a temp data dir."
+version = "0.0.1"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[dependencies]
+anyhow.workspace = true
+tracing.workspace = true
+serde_json.workspace = true
+punktfunk-core.workspace = true
+pf-ps5-app = { path = "../pf-ps5-app" }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+ash = { workspace = true, features = ["loaded"] }
+pf-ps5-vk = { path = "../pf-ps5-vk" }
+
+[lints]
+workspace = true

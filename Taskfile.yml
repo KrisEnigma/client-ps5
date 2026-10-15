@@ -83,6 +83,7 @@ tasks:
     cmds:
       - bash scripts/cargo-ps5.sh build --probe
       - bash scripts/link-title.sh target/x86_64-sie-ps5/release/libpf_ps5_title.a {{.PROBE_ID}} "punktfunk probe"
+      - cd dist && zip -qr {{.PROBE_ID}}.zip {{.PROBE_ID}} && sha256sum {{.PROBE_ID}}.zip > {{.PROBE_ID}}.zip.sha256
 
   deploy:
     desc: Upload dist/<TITLE_ID>/ over FTP (TELEMETRY=ip:port streams the log to `nc -lk port`)

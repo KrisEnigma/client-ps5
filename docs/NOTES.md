@@ -39,14 +39,12 @@ polling (layout unproven, below), a hostname resolver (addresses only).
 
 ## Upstream changes (plan §7)
 
-Local branches in the monorepo, each its own PR when the maintainer agrees; this repository's
-`Cargo.toml` moves to the merged rev, and `runtime/menu.rs` from `Platform::WebOS` to
-`Platform::Ps5`, after they land:
+Merged into monorepo main (#1966–#1968); `Cargo.toml` pins `770504dbc`, which carries all three:
 
-- `feat/console-platform-ps5`: `Platform::Ps5` and its rows; `shortcuts::Client::Ps5`.
-- `feat/client-crates-ps5-target`: `pf-client-core` (portable half, discovery) and
-  `pf-console-ui` build for `all(target_os = "freebsd", target_vendor = "sie")`.
-- `feat/pyrowave-ps5-target`: `pyrowave-sys` and `pf-client-video`'s PyroWave lane on that target.
+- #1966: `Platform::Ps5` and its rows; `shortcuts::Client::Ps5`.
+- #1967: `pf-client-core` (portable half, discovery) and `pf-console-ui` build for
+  `all(target_os = "freebsd", target_vendor = "sie")`.
+- #1968: `pyrowave-sys` and `pf-client-video`'s PyroWave lane on that target.
 
 Not started: the PS5 Skia archive on `skia-binaries` (§7.4, `task skia` builds it), the install
 page entry (§7.5, at WP6). §7.6 (a `ring` provider) only if aws-lc-sys will not cross-build.

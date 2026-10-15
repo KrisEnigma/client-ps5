@@ -48,8 +48,7 @@ pub(super) fn run(app: &mut App, notice: Option<String>) -> Result<UiOutcome> {
         pyrowave_ok: caps.pyrowave,
         av1_ok: false,
         store: Some(store.clone()),
-        // The WebOS rows (TV, pad, no window) until the kit gains `Platform::Ps5` (plan §7).
-        platform: Platform::WebOS,
+        platform: Platform::Ps5,
         gpu_cache_bytes: pf_console_ui::DEFAULT_GPU_CACHE_BYTES,
         screen: None,
         profiles: false,

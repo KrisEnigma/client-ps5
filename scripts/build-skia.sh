@@ -25,9 +25,14 @@ export FORCE_SKIA_BUILD=1
 export CLANGCC="$root/targets/bin/cc" CLANGCXX="$root/targets/bin/c++"
 export SKIA_GN_ARGS='skia_use_fontconfig=false skia_use_system_freetype2=false skia_use_x11=false skia_use_egl=false'
 export BUILD_ARTIFACTSTAGINGDIRECTORY="$out"
-# skia-bindings exports only where `git rev-parse HEAD` works from its own source directory, which
-# sits in cargo's registry. Point git at this checkout; the key swap below replaces its hash.
-export GIT_DIR="$root/.git" GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=safe.directory GIT_CONFIG_VALUE_0='*'
+# skia-bindings exports only where `git rev-parse HEAD` works from its source in cargo's registry.
+# Outside a checkout (CI) the registry gets a throwaway repository; the key swap below drops its hash.
+registry="${CARGO_HOME:-$HOME/.cargo}/registry"
+mkdir -p "$registry"
+git -C "$registry" rev-parse HEAD >/dev/null 2>&1 || {
+    git init -q "$registry"
+    git -C "$registry" -c user.name=pf -c user.email=pf@localhost commit -q --allow-empty -m skia-export
+}
 
 # The title enables the Skia features the archive must carry; what fails after Skia does not matter here.
 bash "$root/scripts/cargo-ps5.sh" build || true

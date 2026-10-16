@@ -47,15 +47,27 @@ stub libSceVideodec2 "$root/scripts/stubs/videodec2.c"
 source "$vk/tools/radv-link.sh"
 radv_link_recipe "$vk" "$sdk" "$archive"
 
-# The client's own bindings, kept local like the recipe's.
-own=(--defsym=pthread_set_name_np=pf_ps5_pthread_set_name_np)
-printf '{\n    local:\n        pthread_set_name_np;\n};\n' > "$work/own-local.map"
+# The client's own bindings (pf-ps5-sys `shim`), kept local like the recipe's.
+shims=(pthread_set_name_np getentropy getrandom recvmmsg if_nametoindex minherit uselocale dl_iterate_phdr)
+own=()
+for s in "${shims[@]}"; do own+=("--defsym=$s=pf_ps5_$s"); done
+own+=(--defsym=_Z11SkLogVAList13SkLogPriorityPKcP13__va_list_tag=pf_ps5_sk_log_va_list)
+{ echo '{'; echo '    local:'; printf '        %s;\n' "${shims[@]}"; echo '};'; } > "$work/own-local.map"
 
+# Rust's FreeBSD 11 bindings name these by symbol version; the console's stubs carry none.
+title="$work/title.a"
+renames=()
+for s in stat fstat lstat readdir kevent; do renames+=("--redefine-sym=$s@FBSD_1.0=$s"); done
+"$sdk/bin/llvm-objcopy" "${renames[@]}" "$lib" "$title"
+
+# A weak reference nothing defines (Mesa's entry points, aws-lc's allocator hooks) is null, not an
+# import the converter needs a stub for. LLD 18 needs --no-dynamic-linker for that, LLD 22 the -z.
 "$sdk/bin/prospero-lld" "${radv_linker_script[@]}" --eh-frame-hdr "${radv_link_flags[@]}" "${own[@]}" \
+    --no-dynamic-linker -z nodynamic-undefined-weak \
     --version-script "$work/own-local.map" \
     --version-script "$vk/tooling/native/app-symbols.map" --exclude-libs=ALL \
     -e _start -o "$work/llvm-pie.elf" \
-    "$work/obj/app_crt.o" "$work/obj/app_cpp_runtime.o" "$lib" \
+    "$work/obj/app_crt.o" "$work/obj/app_cpp_runtime.o" "$title" \
     "$work/stubs/libSceAgc.so" "$work/stubs/libSceAgcDriver.so" "$work/stubs/libSceVideodec2.so" \
     "${radv_link_inputs[@]}" \
     --as-needed "$sdk"/target/lib/*.so

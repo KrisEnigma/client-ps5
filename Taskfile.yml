@@ -41,11 +41,13 @@ tasks:
 
   run:
     desc: The client on this box (PF_PS5_DATA, PF_PS5_SIZE, PF_PS5_PADS)
-    cmds: [cargo run -p pf-ps5 -- {{.CLI_ARGS}}]
+    cmds:
+      - cargo run -p pf-ps5 -- {{.CLI_ARGS}}
 
   probe:
     desc: The WP0 probe on this box; reads probe.json in the data dir given
-    cmds: [cargo run -p pf-ps5-probe -- {{.CLI_ARGS}}]
+    cmds:
+      - cargo run -p pf-ps5-probe -- {{.CLI_ARGS}}
 
   toolchain:
     desc: Install the pinned SDK, RADV, title converter, libc.prx and nightly under .toolchains/
@@ -81,6 +83,7 @@ tasks:
     cmds:
       - bash scripts/cargo-ps5.sh build --probe
       - bash scripts/link-title.sh target/x86_64-sie-ps5/release/libpf_ps5_title.a {{.PROBE_ID}} "punktfunk probe"
+      - cd dist && zip -qr {{.PROBE_ID}}.zip {{.PROBE_ID}} && sha256sum {{.PROBE_ID}}.zip > {{.PROBE_ID}}.zip.sha256
 
   deploy:
     desc: Upload dist/<TITLE_ID>/ over FTP (TELEMETRY=ip:port streams the log to `nc -lk port`)
@@ -88,7 +91,8 @@ tasks:
 
   test-run:
     desc: 'Queue a scripted run: task test-run -- menu | stream HOST [SECONDS]'
-    cmds: [python3 scripts/test-run.py {{.CLI_ARGS}}]
+    cmds:
+      - python3 scripts/test-run.py {{.CLI_ARGS}}
 
   fetch-bundle:
     desc: Fetch the newest test-run bundle into bundles/<TITLE_ID>/
@@ -96,8 +100,10 @@ tasks:
 
   klog:
     desc: Stream the console's kernel log (TCP 3232)
-    cmds: [nc {{.PS5_HOST}} 3232]
+    cmds:
+      - nc {{.PS5_HOST}} 3232
 
   symbolize:
     desc: 'Name a crash log''s frames: task symbolize -- LOG'
-    cmds: [python3 scripts/symbolize.py {{.CLI_ARGS}} dist/{{.TITLE_ID}}.llvm-pie.elf]
+    cmds:
+      - python3 scripts/symbolize.py {{.CLI_ARGS}} dist/{{.TITLE_ID}}.llvm-pie.elf

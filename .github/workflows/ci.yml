@@ -17,7 +17,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Packages
-        run: sudo apt-get update && sudo apt-get install -y cmake clang libclang-dev pkg-config libopus-dev mesa-vulkan-drivers libvulkan1
+        run: sudo apt-get update && sudo apt-get install -y cmake clang libclang-dev pkg-config libopus-dev libfreetype-dev libfontconfig1-dev mesa-vulkan-drivers libvulkan1
       - uses: Swatinem/rust-cache@v2
       - name: Format
         run: cargo fmt --all --check
@@ -45,14 +45,19 @@ jobs:
         with:
           path: .toolchains
           key: toolchains-${{ hashFiles('scripts/pins.env') }}
+      # One container for the job: the nightly and std patch `task toolchain` installs live in it.
+      - name: Toolchain container
+        run: docker run -d --name ps5 -v "$PWD:/w" -w /w -e TITLE_ID=PPSA99724 punktfunk-ps5-toolchain:1 sleep infinity
       - name: Toolchain
-        run: docker run --rm -v "$PWD:/w" -w /w punktfunk-ps5-toolchain:1 task toolchain
+        run: docker exec ps5 task toolchain
+      - name: Skia for the console
+        run: docker exec ps5 task skia
       - name: Cross clippy
-        run: docker run --rm -v "$PWD:/w" -w /w punktfunk-ps5-toolchain:1 task cross-lint
+        run: docker exec ps5 task cross-lint
       - name: Package
-        run: docker run --rm -v "$PWD:/w" -w /w -e TITLE_ID punktfunk-ps5-toolchain:1 task package
-        env:
-          TITLE_ID: PPSA99724
+        run: docker exec ps5 task package
+      - name: Package the probe
+        run: docker exec ps5 task package-probe
       - uses: actions/upload-artifact@v4
         with:
           name: title

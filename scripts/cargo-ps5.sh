@@ -21,15 +21,17 @@ if [[ ${1:-} == --probe ]]; then
 fi
 
 export RUSTFLAGS="--cfg libc_unstable_freebsd_version=\"11\" --cfg getrandom_backend=\"custom\" -C force-frame-pointers=yes ${RUSTFLAGS:-}"
-export CC_x86_64_sie_ps5="$sdk/bin/prospero-clang" CXX_x86_64_sie_ps5="$sdk/bin/prospero-clang++"
+export CC_x86_64_sie_ps5="$root/targets/bin/cc" CXX_x86_64_sie_ps5="$root/targets/bin/c++"
 export AR_x86_64_sie_ps5="$sdk/bin/llvm-ar"
-export CMAKE_TOOLCHAIN_FILE_x86_64_sie_ps5="$sdk/host/toolchain/prospero.cmake"
+export CMAKE_TOOLCHAIN_FILE_x86_64_sie_ps5="$root/targets/ps5.cmake"
+# FreeBSD 11 declares no getentropy; aws-lc calls it, and the link binds it to pf-ps5-sys.
+export CFLAGS_x86_64_sie_ps5="-include $root/targets/ps5-compat.h ${CFLAGS_x86_64_sie_ps5:-}"
 export PS5_PAYLOAD_SDK="$sdk"
 # bindgen (pyrowave-sys, skia-bindings) parses C headers for the console, not the build box.
-export BINDGEN_EXTRA_CLANG_ARGS="--target=x86_64-sie-ps5 -isystem $sdk/target/include ${BINDGEN_EXTRA_CLANG_ARGS:-}"
+export BINDGEN_EXTRA_CLANG_ARGS="--target=x86_64-sie-ps5 -isystem $sdk/target/include/c++/v1 -isystem $root/targets/include -isystem $sdk/target/include"
 # Skia: the archive scripts/build-skia.sh produced, never a silent hour-long source build.
 export SKIA_BINARIES_URL="file://$root/.toolchains/skia/{tag}/skia-binaries-{key}.tar.gz"
 export PF_MESA_PIN="${PS5_MESA_REV:0:12}" PF_CORE_REV="${PUNKTFUNK_REV:0:9}"
 
-exec cargo "+$RUST_NIGHTLY" "$cmd" --release -Z build-std=std,panic_abort \
+exec cargo "+$RUST_NIGHTLY" "$cmd" --release -Z build-std=std,panic_abort -Z json-target-spec \
     --target "$root/targets/x86_64-sie-ps5.json" -p "${PS5_PACKAGE:-pf-ps5-title}" "${features[@]}" "$@"

@@ -26,8 +26,10 @@ jobs:
         run: docker build -t punktfunk-ps5-toolchain:1 -f docker/Dockerfile docker
       - name: Package
         run: |
-          docker run --rm -v "$PWD:/w" -w /w punktfunk-ps5-toolchain:1 task toolchain
-          docker run --rm -v "$PWD:/w" -w /w -e TITLE_ID -e PKG_VERSION punktfunk-ps5-toolchain:1 task package
+          docker run -d --name ps5 -v "$PWD:/w" -w /w -e TITLE_ID -e PKG_VERSION punktfunk-ps5-toolchain:1 sleep infinity
+          docker exec ps5 task toolchain
+          docker exec ps5 task skia
+          docker exec ps5 task package
         env:
           TITLE_ID: ${{ vars.TITLE_ID }}
           PKG_VERSION: ${{ github.ref_name }}

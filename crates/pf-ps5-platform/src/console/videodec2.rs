@@ -156,10 +156,9 @@ struct Decoder {
     queue: *mut c_void,
     is_h264: bool,
     ten_bit: bool,
-    /// Visible picture, and the coded surface the decoder writes.
+    /// The visible picture.
     width: u32,
     height: u32,
-    coded_height: u32,
     input: Direct,
     frames: Vec<FrameSlot>,
     next_frame: usize,
@@ -223,8 +222,7 @@ fn config_for(codec: u8, ten_bit: bool, width: u32, height: u32, hz: u32) -> Res
         quic::CODEC_HEVC => {
             let level = match (big > 2560 * 1440, big > 1920 * 1088, fast) {
                 (true, _, true) => 156,
-                (true, _, false) => 153,
-                (false, true, true) => 153,
+                (true, _, false) | (false, true, true) => 153,
                 (false, true, false) | (false, false, true) => 150,
                 (false, false, false) => 123,
             };
@@ -337,7 +335,6 @@ impl Decoder {
                 ten_bit,
                 width: spec.width,
                 height: spec.height,
-                coded_height,
                 input,
                 frames,
                 next_frame: 0,
@@ -590,12 +587,14 @@ fn import(dev: &GpuDevice, slot: &Direct) -> Result<Upload> {
     let mut props = vk::MemoryHostPointerPropertiesEXT::default();
     // SAFETY: the pointer is a live direct-memory mapping of `slot.len` bytes, 16 KiB aligned.
     unsafe {
-        ext.get_memory_host_pointer_properties(
+        (ext.fp().get_memory_host_pointer_properties_ext)(
+            dev.device.handle(),
             vk::ExternalMemoryHandleTypeFlags::HOST_ALLOCATION_EXT,
             slot.addr,
             &mut props,
         )
-    }?;
+    }
+    .result()?;
     let mut external = vk::ExternalMemoryBufferCreateInfo::default()
         .handle_types(vk::ExternalMemoryHandleTypeFlags::HOST_ALLOCATION_EXT);
     // SAFETY: builders are locals; the buffer and memory are destroyed with the frame slot.

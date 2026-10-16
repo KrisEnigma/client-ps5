@@ -1,0 +1,6 @@
+#!/bin/sh
+# The console's compiler for cargo's C/C++ dependencies. cc-rs and cmake-rs add
+# --target=x86_64-sie-freebsd for the custom target, which takes clang off the SDK's headers, so it
+# goes; the SDK wrapper sets x86_64-sie-ps5. targets/include holds what FreeBSD 11 lacks.
+for a; do shift; case $a in --target=*) ;; *) set -- "$@" "$a" ;; esac; done
+exec "$PS5_PAYLOAD_SDK/bin/prospero-clang++" -isystem "$(dirname "$0")/../include" "$@"

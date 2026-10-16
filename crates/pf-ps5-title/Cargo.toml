@@ -23,6 +23,8 @@ libc = "0.2"
 
 [target.'cfg(target_vendor = "sie")'.dependencies]
 pf-ps5-platform = { path = "../pf-ps5-platform" }
+# The console has no system FreeType; without this Skia reads the build box's headers.
+skia-safe = { workspace = true, features = ["embed-freetype"] }
 
 [lints]
 workspace = true

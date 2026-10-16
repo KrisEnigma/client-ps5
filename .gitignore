@@ -7,3 +7,5 @@ tmp/
 # Fetched by `task toolchain`: the payload SDK, the static RADV and Skia archives.
 .toolchains/
 .env
+# Written by pf-ps5-app's build script on every build.
+THIRD-PARTY-NOTICES.txt

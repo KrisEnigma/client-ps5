@@ -1,8 +1,8 @@
 # PS5 client — a Rust homebrew title on Vulkan
 
-> **Status: code written through WP4, 2026-10-15; nothing proven on a console yet.** Where the
-> code departs from this plan, and what each work package still needs a console for:
-> `NOTES.md`. Repository `punktfunk/client-ps5`.
+> **Status: code written through WP4 and linked for the console, 2026-10-16; nothing proven on a
+> console yet.** Where the code departs from this plan, and what each work package still needs a
+> console for: `NOTES.md`. Repository `punktfunk/client-ps5`.
 >
 > Supersedes the 2026-10-15 proposal draft: Vulkan (RADV) replaces GL/AGC as the one graphics path, PyroWave is in the first release rather than a later extension, 3840×2160 at
 > 119.88 Hz is the output the client is built for, the console's own libraries are preferred over

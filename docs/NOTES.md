@@ -4,11 +4,11 @@ What this client knows about the console, where each fact comes from, and what s
 console run to prove. Plan of record: `plan.md`. A claim proven on the console cites its bundle
 id; until the first bundle, every console fact below is **sourced, not proven**.
 
-## Where the code stands (2026-10-15)
+## Where the code stands (2026-10-16)
 
 | WP | Written | Proven without a console | Needs a console run for |
 | --- | --- | --- | --- |
-| 0 | probe (16 checks), target JSON, toolchain + link scripts, FFI with layout tests | probe passes on macOS and Linux; layouts pinned | every probe line on 13.60, both launch forms |
+| 0 | probe (16 checks), target JSON, toolchain + link scripts, FFI with layout tests | probe passes on macOS and Linux; layouts pinned; title and probe link in CI (artifact `title`) | every probe line on 13.60, both launch forms |
 | 1 | device, `VK_KHR_display` output, presenter, read-back, PyroWave lane | presenter renders the console on lavapipe (CI artifact) | swapchain at 119.88 Hz, pacing record, PyroWave feature line |
 | 2 | console hosting, service loop, store, pairing, library, art | fakes and the host platform; menu test run produces a PNG | Skia's Vulkan backend on RADV (R4) |
 | 3 | stage/timeline/pump (lifted), Videodec2 lane, PyroWave lane | stage tests incl. intra-only anchors | Videodec2 decode, the import step taken, 4K120 budgets |

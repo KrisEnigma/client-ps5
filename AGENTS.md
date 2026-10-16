@@ -22,7 +22,8 @@ The app never names a console API or a Vulkan handle; the binary hands it a `Pla
 
 `task --list`. `task test` / `task lint` run here; `task docker:*` the same in the toolchain image.
 `task cross-check` type-checks the console code a host check never compiles. `task package` builds
-`dist/<TITLE_ID>/`; `task deploy`, `task test-run -- menu`, `task fetch-bundle` drive the console.
+`dist/<TITLE_ID>/`, `task unpack -- ZIP` lays out a CI build; `task deploy`, `task test-run -- menu`,
+`task fetch-bundle` drive the console, `task probe-deploy`, `probe-host`, `probe-fetch` the probe.
 
 ## Invariants
 

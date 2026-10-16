@@ -12,8 +12,12 @@ def connect() -> ftplib.FTP:
     host = os.environ.get("PS5_HOST")
     if not host:
         raise SystemExit("Set PS5_HOST to the console's address (see .env.example).")
+    port = int(os.environ.get("PS5_FTP_PORT", "2121"))
     ftp = ftplib.FTP()
-    ftp.connect(host, int(os.environ.get("PS5_FTP_PORT", "2121")), timeout=15)
+    try:
+        ftp.connect(host, port, timeout=15)
+    except OSError as e:
+        raise SystemExit(f"Couldn't reach the console at {host}:{port}. Check it is on and its FTP server runs — {e}")
     ftp.login(os.environ.get("PS5_FTP_USER", "anonymous"), os.environ.get("PS5_FTP_PASSWORD", ""))
     ftp.voidcmd("TYPE I")
     return ftp

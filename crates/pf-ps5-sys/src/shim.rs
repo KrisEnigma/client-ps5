@@ -10,6 +10,13 @@ use core::ffi::{c_char, c_int, c_uint, c_void};
 #[no_mangle]
 pub extern "C" fn pf_ps5_pthread_set_name_np(_thread: *mut c_void, _name: *const c_char) {}
 
+/// The same for `pthread_setname_np`, which this std calls: only libScePosixForWebKit's stub
+/// defines it, and a title's import from that module is null, so naming jumped to address 0.
+#[no_mangle]
+pub extern "C" fn pf_ps5_pthread_setname_np(_thread: *mut c_void, _name: *const c_char) -> c_int {
+    0
+}
+
 /// POSIX `getentropy` for aws-lc: FreeBSD 11's libc has none. At most 256 bytes, as POSIX says.
 ///
 /// # Safety
@@ -127,26 +134,31 @@ pub unsafe extern "C" fn pf_ps5_sk_log_va_list(_priority: c_int, fmt: *const c_c
 }
 
 /// Fills `buf` from `kern.rng_pseudo`, the entropy source console titles have proven; the
-/// SDK's `arc4random` points at nothing in a title. At most 64 bytes per sysctl.
+/// SDK's `arc4random` points at nothing in a title. The sysctl hands out 64-byte blocks and
+/// refuses a smaller buffer, so each chunk is read whole and its prefix copied.
 #[cfg(any(target_os = "freebsd", target_vendor = "apple"))]
 pub fn fill_random(buf: &mut [u8]) -> Result<(), c_int> {
+    let mut block = [0u8; 64];
     for chunk in buf.chunks_mut(64) {
-        let mut len = chunk.len();
-        // SAFETY: the name is NUL-terminated; `chunk` is writable for `len` bytes and `len` is
+        let mut len = block.len();
+        // SAFETY: the name is NUL-terminated; `block` is writable for `len` bytes and `len` is
         // updated in place by the call.
         let rc = unsafe {
             libc::sysctlbyname(
                 c"kern.rng_pseudo".as_ptr(),
-                chunk.as_mut_ptr().cast(),
+                block.as_mut_ptr().cast(),
                 &mut len,
                 core::ptr::null_mut::<c_void>() as _,
                 0,
             )
         };
-        if rc != 0 || len != chunk.len() {
+        if rc != 0 || len < chunk.len() {
+            block.fill(0);
             return Err(rc);
         }
+        chunk.copy_from_slice(&block[..chunk.len()]);
     }
+    block.fill(0);
     Ok(())
 }
 

@@ -265,9 +265,9 @@ fn entropy(_: &Ctx) -> Result<Outcome> {
         |e| format!("getrandom 0.2 failed ({e})"),
         |()| "getrandom 0.2 ok".into(),
     );
-    // The client's source is the sysctl (aws-lc's getentropy, std's getrandom); a buffer it
-    // left partly written is still a failure.
-    if filled.is_err() || a == [0; 32] {
+    // The console's source is the sysctl (aws-lc's getentropy, std's getrandom); a buffer it
+    // left partly written is still a failure. A dev box has no such sysctl.
+    if cfg!(target_vendor = "sie") && (filled.is_err() || a == [0; 32]) {
         bail!("{sysctl}, {g02}");
     }
     ok(format!("{sysctl}, {g02}"))
@@ -358,6 +358,7 @@ fn kevent_receipt(kq: libc::c_int, filter: i16, ident: usize) -> Result<libc::c_
 
 /// Each step tokio, mio, socket2 and quinn-udp take on a socket or kqueue, with its errno:
 /// which one the console refuses. `std` steps go through the title's `fcntl`/`ioctl` wraps.
+/// Only those fail the check; `raw_` steps record the console's own answer past the wraps.
 #[cfg(target_os = "freebsd")]
 fn async_steps(_: &Ctx) -> Result<Outcome> {
     use std::os::fd::{AsRawFd, FromRawFd};
@@ -368,7 +369,7 @@ fn async_steps(_: &Ctx) -> Result<Outcome> {
         match r {
             Ok(_) => lines.push(format!("{name} ok")),
             Err(e) => {
-                failed = true;
+                failed |= !name.starts_with("raw_");
                 lines.push(format!("{name} errno {e}"));
             }
         }

@@ -2,13 +2,13 @@
 
 What this client knows about the console, where each fact comes from, and what still needs a
 console run to prove. Plan of record: `plan.md`. A claim proven on the console cites its bundle
-id; until the first bundle, every console fact below is **sourced, not proven**.
+id or probe log; the rest is **sourced, not proven**.
 
-## Where the code stands (2026-10-16)
+## Where the code stands (2026-10-17)
 
 | WP | Written | Proven without a console | Needs a console run for |
 | --- | --- | --- | --- |
-| 0 | probe (16 checks), target JSON, toolchain + link scripts, FFI with layout tests | probe passes on macOS and Linux; layouts pinned; title and probe link in CI (artifact `title`) | every probe line on 13.60, both launch forms |
+| 0 | probe (16 checks), target JSON, toolchain + link scripts, FFI with layout tests | probe passes on macOS and Linux; layouts pinned; title and probe link in CI (artifact `title`) | `sockbuf` and `mdns`; the rest passed on 13.42 (round 1) |
 | 1 | device, `VK_KHR_display` output, presenter, read-back, PyroWave lane | presenter renders the console on lavapipe (CI artifact) | swapchain at 119.88 Hz, pacing record, PyroWave feature line |
 | 2 | console hosting, service loop, store, pairing, library, art | fakes and the host platform; menu test run produces a PNG | Skia's Vulkan backend on RADV (R4) |
 | 3 | stage/timeline/pump (lifted), Videodec2 lane, PyroWave lane | stage tests incl. intra-only anchors | Videodec2 decode, the import step taken, 4K120 budgets |
@@ -49,6 +49,33 @@ Merged into monorepo main (#1966–#1968); `Cargo.toml` pins `770504dbc`, which 
 Not started: the PS5 Skia archive on `skia-binaries` (§7.4, `task skia` builds it), the install
 page entry (§7.5, at WP6). §7.6 (a `ring` provider) only if aws-lc-sys will not cross-build.
 
+## Proven on the console (round 1, 2026-10-17)
+
+A tester's PS5 on 13.42, wired to a Windows host. Evidence kept with the tester's report: probe
+logs `probe-20261017-015745.log` and `probe-20261017-031128.log`, menu bundle
+`PPSA99724/1792206947`, kernel logs `klog-20261016*.txt` and `klog-20261017-*.txt`.
+
+- **Dead imports:** `pthread_setname_np`, `gai_strerror` and `mkstemp` resolve only to
+  libScePosixForWebKit, `readlink` only to libkernel_sys, and a title's import from either is
+  null. Each has a shim; `link-title.sh` refuses a title that imports another.
+- **Entropy:** `kern.rng_pseudo` hands out 64-byte blocks and refuses a smaller buffer (ENOMEM).
+- **Socket flags:** on a socket, `ioctl(FIONBIO)` and `fcntl(F_SETFL)` fail with EACCES and
+  `F_GETFD`/`F_SETFD` with EINVAL; `SO_NBIO` (0x1200) works, and so do sockets created with
+  `SOCK_NONBLOCK|SOCK_CLOEXEC`. The `fcntl`/`ioctl` wraps map one onto the other.
+- **No duplicates:** `F_DUPFD_CLOEXEC` (EINVAL) and `dup` (EPERM) are refused on sockets and
+  kqueues; `--wrap=close` shares the descriptor instead. kqueue itself works for mio and tokio:
+  `EVFILT_USER`, read and write filters, UDP readiness. quinn-udp works through the wraps.
+- **Execute-only code:** reading `.text` faults (`SYSTEM_XO_VIOLATION`). aws-lc builds without
+  assembly: s2n-bignum keeps its tables there.
+- **Videodec2:** HEVC needs the coded height in 32-row blocks (2176 for 2160); at 2160 every
+  picture fails `0x811d0302`. H.264 decodes at 2160, 4K60 at ~13.5 ms a frame.
+- **Socket buffers** stayed at FreeBSD's defaults, 9 KiB send and 41 KiB receive: core's 32 MiB
+  ask was refused whole. Probe `sockbuf` records the console's answers.
+- **UI layer:** the menu ran on the half-size CPU raster, ~200 ms a frame. Skia on Vulkan
+  refused the device's 1.4 version (fixed; lavapipe reproduced it), and the startup line now
+  names the path.
+- **Open:** `mdns` found no host in 4 s on any run, while the host answered over TCP.
+
 ## Console facts the code relies on (sourced, not yet proven)
 
 Sources: ProsperoLight (PL), PS5_Vulkan (VK), PS5_VulkanTemplate (TPL), the payload SDK (SDK),
@@ -85,19 +112,9 @@ OpenNOW-PS5 (ONW). Section numbers refer to the extraction kept with the plan's 
 
 ## Open questions the probe answers first
 
-1. **BSD sockets in a title.** ProsperoLight routes every socket through libSceNet
-   (`sceNetSocket`, `sceNetEpoll*`) and never uses BSD fds; std, mio and quinn-udp use BSD fds.
-   Probe lines `udp-quinn`, `udp-rate`, `tcp-mgmt`, `quic-tls`, `mdns` and `tokio` answer it. If
-   they fail with refused syscalls, the shim is a libc-level redirect of socket calls onto sceNet
-   in `pf-ps5-sys` (R1); `pf-ps5-sys::net` already declares the calls.
-2. **`_umtx_op` for std's locks.** std's FreeBSD port parks threads with `_umtx_op`; PL and VK
-   only prove pthread primitives. Probe `mutex-condvar`.
-3. **`kqueue` under mio/tokio.** Unproven in a title; the console's own queues are
-   `sceKernelCreateEqueue`. Probe `tokio`.
-4. **getrandom 0.2's FreeBSD path** (`kern.arandom` or `getrandom(2)`), used by `rand_core` under
-   curve25519. Probe `entropy` reports it beside `kern.rng_pseudo`.
-5. **recvmmsg batch size** at 10k datagrams/s and the per-datagram cost with the loader's hooks
-   (R7). Probe `udp-rate`.
+Round 1 answered BSD sockets, `_umtx_op`, kqueue, getrandom 0.2 and recvmmsg: all work in a
+title, through the wraps above (`udp-rate`: 10 000 datagrams, ~4.2 µs each).
+
 6. **`dlopen` at link time.** Granite references `dlopen` even when handed a
    `GetInstanceProcAddr`; if the console's libkernel stub lacks it, the title link needs a
    `--defsym` to a stub returning null (WP1).

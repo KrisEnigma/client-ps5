@@ -1261,7 +1261,10 @@ name = "pf-ps5-probe"
 version = "0.0.1"
 dependencies = [
  "anyhow",
+ "aws-lc-rs",
  "getrandom 0.2.17",
+ "libc",
+ "pf-client-core",
  "pf-ps5-app",
  "pf-ps5-sys",
  "punktfunk-core",

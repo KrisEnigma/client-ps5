@@ -140,6 +140,7 @@ impl TestRun {
             "model": app.device.model,
             "firmware": app.device.firmware,
             "gpu": app.device.gpu,
+            "ui": app.device.ui,
             "output": { "width": width, "height": height, "refresh_mhz": app.display.refresh().0 },
         });
         for (name, value) in [("verdict.json", &verdict), ("environment.json", &environment)] {

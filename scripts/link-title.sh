@@ -48,10 +48,18 @@ source "$vk/tools/radv-link.sh"
 radv_link_recipe "$vk" "$sdk" "$archive"
 
 # The client's own bindings (pf-ps5-sys `shim`), kept local like the recipe's.
-shims=(pthread_set_name_np getentropy getrandom recvmmsg if_nametoindex minherit uselocale dl_iterate_phdr)
+shims=(pthread_set_name_np pthread_setname_np getentropy getrandom recvmmsg if_nametoindex minherit uselocale dl_iterate_phdr
+    gai_strerror)
+# The recipe binds these itself once the SDK pin carries them.
+for s in mkstemp readlink; do
+    [[ " ${radv_link_flags[*]} " == *" --defsym=$s="* ]] || shims+=("$s")
+done
 own=()
 for s in "${shims[@]}"; do own+=("--defsym=$s=pf_ps5_$s"); done
 own+=(--defsym=_Z11SkLogVAList13SkLogPriorityPKcP13__va_list_tag=pf_ps5_sk_log_va_list)
+# Socket flags through the console's SO_NBIO where fcntl and FIONBIO are refused, shared
+# descriptors where it refuses a duplicate, socket buffers its cap refuses (shim.rs).
+own+=(--wrap=fcntl --wrap=ioctl --wrap=close --wrap=setsockopt)
 { echo '{'; echo '    local:'; printf '        %s;\n' "${shims[@]}"; echo '};'; } > "$work/own-local.map"
 
 # Rust's FreeBSD 11 bindings name these by symbol version; the console's stubs carry none.
@@ -71,6 +79,16 @@ for s in stat fstat lstat readdir kevent; do renames+=("--redefine-sym=$s@FBSD_1
     "$work/stubs/libSceAgc.so" "$work/stubs/libSceAgcDriver.so" "$work/stubs/libSceVideodec2.so" \
     "${radv_link_inputs[@]}" \
     --as-needed "$sdk"/target/lib/*.so
+
+# An import whose first definer (link order) is one of these stubs links and is null at run time.
+dead=$(
+    for s in "$sdk"/target/lib/*.so; do
+        "$sdk/bin/llvm-nm" -D --defined-only "$s" | awk -v lib="${s##*/}" '{ print $NF, lib }'
+    done | awk 'NR == FNR { if (!($1 in owner)) owner[$1] = $2; next }
+        owner[$NF] ~ /^lib(ScePosixForWebKit|kernel_sys)\.so$/ { print "  " $NF " (" owner[$NF] ")" }' \
+        - <("$sdk/bin/llvm-nm" -D --undefined-only "$work/llvm-pie.elf")
+)
+[[ -z $dead ]] || { printf 'imports a title gets nothing from; shim them in pf-ps5-sys:\n%s\n' "$dead" >&2; exit 1; }
 
 "$tool" link --in "$work/llvm-pie.elf" --out "$work/eboot.elf" \
     --stub-dir "$sdk/target/lib" \

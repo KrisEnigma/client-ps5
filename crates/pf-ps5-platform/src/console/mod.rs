@@ -104,8 +104,10 @@ pub fn platform() -> Result<Platform> {
     let device = DeviceInfo {
         platform: "ps5",
         model: "PlayStation 5".into(),
-        firmware: String::new(),
+        firmware: pf_ps5_sys::kernel::system_version()
+            .map_or_else(String::new, |v| format!("{:x}.{:02x}", v >> 24, (v >> 16) & 0xff)),
         gpu: format!("{} (mesa {MESA_PIN})", dev.name),
+        ui: presenter.ui(),
     };
     Ok(Platform {
         display: Box::new(presenter),

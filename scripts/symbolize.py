@@ -15,10 +15,16 @@ def main() -> int:
     if len(sys.argv) != 3:
         sys.exit("usage: symbolize.py LOG ELF")
     text = open(sys.argv[1], encoding="utf-8", errors="replace").read()
-    base_match = re.search(r"xotext[^\n]*?0x([0-9a-fA-F]+)", text)
+    base_match = re.search(r"xotext:\s*([0-9a-fA-F]{16}):", text)
     base = int(base_match.group(1), 16) if base_match else 0x400000
     addrs = []
-    for m in re.finditer(r"0x([0-9a-fA-F]{6,16})", text):
+    # A crash record prints bare 16-digit hex after `rip:`, `fault address:` and on each
+    # backtrace line; the rest of a klog is other processes' noise. The panic hook prints 0x.
+    if "# backtrace:" in text:
+        pattern = r"^#\s+(?:rip:\s+|fault address:\s+)?([0-9a-fA-F]{16})\b"
+    else:
+        pattern = r"0x([0-9a-fA-F]{6,16})"
+    for m in re.finditer(pattern, text, re.MULTILINE):
         a = int(m.group(1), 16)
         if a >= base and a - base < 0x1000_0000 and a not in addrs:
             addrs.append(a)

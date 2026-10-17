@@ -85,8 +85,11 @@ const CHECKS: &[(&str, Check)] = &[
     ("files", files),
     ("entropy", entropy),
     ("hashmap-seed", hashmap_seed),
+    ("crypto", crypto),
+    ("async-steps", async_steps),
     ("udp-quinn", udp_quinn),
     ("udp-rate", udp_rate),
+    ("sockbuf", sockbuf),
     ("tokio", tokio_runtime),
     ("tcp-mgmt", tcp_mgmt),
     ("quic-tls", quic_tls),
@@ -167,6 +170,8 @@ fn threads(_: &Ctx) -> Result<Outcome> {
     ok("16 named threads spawned and joined")
 }
 
+// The initializer is const; on the console's emulated TLS the macro hides that from clippy.
+#[allow(clippy::missing_const_for_thread_local)]
 fn thread_locals(_: &Ctx) -> Result<Outcome> {
     thread_local!(static CELL: std::cell::Cell<u64> = const { std::cell::Cell::new(0) });
     CELL.with(|c| c.set(7));
@@ -253,7 +258,8 @@ fn files(ctx: &Ctx) -> Result<Outcome> {
 
 fn entropy(_: &Ctx) -> Result<Outcome> {
     let mut a = [0u8; 32];
-    let sysctl = pf_ps5_sys::shim::fill_random(&mut a).map_or_else(
+    let filled = pf_ps5_sys::shim::fill_random(&mut a);
+    let sysctl = filled.map_or_else(
         |rc| format!("kern.rng_pseudo failed ({rc})"),
         |()| "kern.rng_pseudo ok".into(),
     );
@@ -262,7 +268,9 @@ fn entropy(_: &Ctx) -> Result<Outcome> {
         |e| format!("getrandom 0.2 failed ({e})"),
         |()| "getrandom 0.2 ok".into(),
     );
-    if a == [0; 32] && b == [0; 32] {
+    // The console's source is the sysctl (aws-lc's getentropy, std's getrandom); a buffer it
+    // left partly written is still a failure. A dev box has no such sysctl.
+    if cfg!(target_vendor = "sie") && (filled.is_err() || a == [0; 32]) {
         bail!("{sysctl}, {g02}");
     }
     ok(format!("{sysctl}, {g02}"))
@@ -272,6 +280,299 @@ fn hashmap_seed(_: &Ctx) -> Result<Outcome> {
     let mut m = HashMap::new();
     m.insert("a", 1);
     ok(format!("RandomState seeded ({} entry)", m.len()))
+}
+
+/// The key exchanges and ciphers the QUIC handshake and media use, through aws-lc as rustls
+/// calls it: its assembly read tables out of execute-only code (x25519 base).
+fn crypto(_: &Ctx) -> Result<Outcome> {
+    use aws_lc_rs::{aead, agreement, rand::SystemRandom};
+    let rng = SystemRandom::new();
+    let mut done = Vec::new();
+    for (name, alg) in [("x25519", &agreement::X25519), ("p256", &agreement::ECDH_P256)] {
+        let ours = agreement::EphemeralPrivateKey::generate(alg, &rng)?;
+        let theirs = agreement::EphemeralPrivateKey::generate(alg, &rng)?;
+        let their_public = theirs.compute_public_key()?;
+        let peer = agreement::UnparsedPublicKey::new(alg, their_public.as_ref());
+        let len = agreement::agree_ephemeral(ours, peer, aws_lc_rs::error::Unspecified, |k| Ok(k.len()))?;
+        done.push(format!("{name} {len} B"));
+    }
+    for (name, alg) in [
+        ("aes-256-gcm", &aead::AES_256_GCM),
+        ("chacha20", &aead::CHACHA20_POLY1305),
+    ] {
+        let key = aead::LessSafeKey::new(aead::UnboundKey::new(alg, &[7; 32])?);
+        let mut buf = vec![0u8; 1200];
+        key.seal_in_place_append_tag(
+            aead::Nonce::assume_unique_for_key([1; 12]),
+            aead::Aad::empty(),
+            &mut buf,
+        )?;
+        let plain = key.open_in_place(
+            aead::Nonce::assume_unique_for_key([1; 12]),
+            aead::Aad::empty(),
+            &mut buf,
+        )?;
+        if plain.iter().any(|&b| b != 0) {
+            bail!("{name} round trip changed the text");
+        }
+        done.push(name.to_string());
+    }
+    ok(done.join(", "))
+}
+
+#[cfg(target_vendor = "sie")]
+extern "C" {
+    fn __real_fcntl(fd: libc::c_int, cmd: libc::c_int, ...) -> libc::c_int;
+    fn __real_ioctl(fd: libc::c_int, request: libc::c_ulong, ...) -> libc::c_int;
+    fn __real_setsockopt(
+        fd: libc::c_int,
+        level: libc::c_int,
+        name: libc::c_int,
+        value: *const libc::c_void,
+        len: libc::socklen_t,
+    ) -> libc::c_int;
+}
+
+#[cfg(target_os = "freebsd")]
+fn errno() -> i32 {
+    std::io::Error::last_os_error().raw_os_error().unwrap_or(0)
+}
+
+#[cfg(target_os = "freebsd")]
+fn sys(rc: libc::c_int) -> Result<libc::c_int, i32> {
+    if rc >= 0 {
+        Ok(rc)
+    } else {
+        Err(errno())
+    }
+}
+
+/// One change through `kevent` with `EV_RECEIPT`, as mio registers: the error comes back in the
+/// receipt, not the return value.
+#[cfg(target_os = "freebsd")]
+fn kevent_receipt(kq: libc::c_int, filter: i16, ident: usize) -> Result<libc::c_int, i32> {
+    // SAFETY: an all-zero kevent is a valid value.
+    let mut change: libc::kevent = unsafe { std::mem::zeroed() };
+    change.ident = ident;
+    change.filter = filter;
+    change.flags = libc::EV_ADD | libc::EV_CLEAR | libc::EV_RECEIPT;
+    let mut receipt = change;
+    let zero = libc::timespec { tv_sec: 0, tv_nsec: 0 };
+    // SAFETY: one readable change, one writable receipt, a readable timeout.
+    let n = sys(unsafe { libc::kevent(kq, &change, 1, &mut receipt, 1, &zero) })?;
+    if n == 1 && receipt.flags & libc::EV_ERROR != 0 && receipt.data != 0 {
+        return Err(receipt.data as i32);
+    }
+    Ok(0)
+}
+
+/// Each step tokio, mio, socket2 and quinn-udp take on a socket or kqueue, with its errno:
+/// which one the console refuses. `std` steps go through the title's `fcntl`/`ioctl` wraps.
+/// Only those fail the check; `raw_` steps record the console's own answer past the wraps.
+#[cfg(target_os = "freebsd")]
+fn async_steps(_: &Ctx) -> Result<Outcome> {
+    use std::os::fd::{AsRawFd, FromRawFd};
+    let mut lines = Vec::new();
+    let mut failed = false;
+    let mut fds = Vec::new();
+    let mut step = |name: &str, r: Result<libc::c_int, i32>| {
+        match r {
+            Ok(_) => lines.push(format!("{name} ok")),
+            Err(e) => {
+                failed |= !name.starts_with("raw_");
+                lines.push(format!("{name} errno {e}"));
+            }
+        }
+        r.unwrap_or(-1)
+    };
+
+    let udp = UdpSocket::bind("127.0.0.1:0")?;
+    let fd = udp.as_raw_fd();
+    step("fionbio", udp.set_nonblocking(true).map(|()| 0).map_err(|_| errno()));
+    // SAFETY: `fd` is the open socket above.
+    step("getfl", sys(unsafe { libc::fcntl(fd, libc::F_GETFL) }));
+    let one: libc::c_int = 1;
+    for (name, level, opt) in [
+        ("ip_recvtos", libc::IPPROTO_IP, libc::IP_RECVTOS),
+        ("ip_dontfrag", libc::IPPROTO_IP, libc::IP_DONTFRAG),
+        ("ip_recvdstaddr", libc::IPPROTO_IP, libc::IP_RECVDSTADDR),
+    ] {
+        let len = size_of::<libc::c_int>() as libc::socklen_t;
+        // SAFETY: `one` is a readable int of `len` bytes.
+        step(
+            name,
+            sys(unsafe { libc::setsockopt(fd, level, opt, (&raw const one).cast(), len) }),
+        );
+    }
+
+    // SAFETY: no arguments.
+    let kq = step("kqueue", sys(unsafe { libc::kqueue() }));
+    if kq >= 0 {
+        fds.push(kq);
+        // SAFETY: `kq` is the open kqueue above.
+        step(
+            "kq_cloexec",
+            sys(unsafe { libc::fcntl(kq, libc::F_SETFD, libc::FD_CLOEXEC) }),
+        );
+        step("kevent_user", kevent_receipt(kq, libc::EVFILT_USER, 0));
+        step("kevent_read", kevent_receipt(kq, libc::EVFILT_READ, fd as usize));
+        step("kevent_write", kevent_receipt(kq, libc::EVFILT_WRITE, fd as usize));
+        // tokio's I/O driver clones mio's kqueue (`Registry::try_clone`).
+        #[cfg(target_vendor = "sie")]
+        {
+            // SAFETY: `kq` is the open kqueue.
+            fds.push(step(
+                "raw_dupfd_kq",
+                sys(unsafe { __real_fcntl(kq, libc::F_DUPFD_CLOEXEC, 3) }),
+            ));
+            // SAFETY: as above.
+            fds.push(step("raw_dup_kq", sys(unsafe { libc::dup(kq) })));
+        }
+        // SAFETY: `kq` stays open in `fds`; `forget` keeps the borrowed one from closing it.
+        let borrowed = std::mem::ManuallyDrop::new(unsafe { std::os::fd::OwnedFd::from_raw_fd(kq) });
+        let clone = borrowed.try_clone();
+        step(
+            "kq_try_clone",
+            clone.as_ref().map(|_| 0).map_err(|e| e.raw_os_error().unwrap_or(-2)),
+        );
+        drop(clone);
+        step(
+            "kq_after_clone_drop",
+            kevent_receipt(kq, libc::EVFILT_WRITE, fd as usize),
+        );
+    }
+
+    let flags = libc::SOCK_NONBLOCK | libc::SOCK_CLOEXEC;
+    // SAFETY: plain socket creation.
+    fds.push(step(
+        "tcp_nb_cloexec",
+        sys(unsafe { libc::socket(libc::AF_INET, libc::SOCK_STREAM | flags, 0) }),
+    ));
+    // SAFETY: plain socket creation.
+    fds.push(step(
+        "udp_nb_cloexec",
+        sys(unsafe { libc::socket(libc::AF_INET, libc::SOCK_DGRAM | flags, 0) }),
+    ));
+    // SAFETY: plain socket creation.
+    fds.push(step(
+        "tcp_plain",
+        sys(unsafe { libc::socket(libc::AF_INET, libc::SOCK_STREAM, 0) }),
+    ));
+    let mut pair = [-1; 2];
+    // SAFETY: `pair` is writable for two fds.
+    step(
+        "unix_pair_nb_cloexec",
+        sys(unsafe { libc::socketpair(libc::AF_UNIX, libc::SOCK_STREAM | flags, 0, pair.as_mut_ptr()) }),
+    );
+    fds.extend(pair);
+
+    // The console's own answers, past the title's wraps, then the same calls through them.
+    #[cfg(target_vendor = "sie")]
+    {
+        let mut on: libc::c_int = 1;
+        // SAFETY: `fd` is the open socket; FIONBIO reads the int.
+        step(
+            "raw_fionbio",
+            sys(unsafe { __real_ioctl(fd, libc::FIONBIO, &raw mut on) }),
+        );
+        // SAFETY: `fd` is the open socket.
+        step(
+            "raw_setfl",
+            sys(unsafe { __real_fcntl(fd, libc::F_SETFL, libc::O_NONBLOCK) }),
+        );
+        // SAFETY: `fd` is the open socket.
+        step(
+            "raw_setfd",
+            sys(unsafe { __real_fcntl(fd, libc::F_SETFD, libc::FD_CLOEXEC) }),
+        );
+        // SAFETY: `pair[0]` is the open unix socket (or -1, which fails).
+        fds.push(step(
+            "raw_dupfd_unix",
+            sys(unsafe { __real_fcntl(pair[0], libc::F_DUPFD_CLOEXEC, 3) }),
+        ));
+        // SAFETY: as above.
+        fds.push(step("raw_dup_unix", sys(unsafe { libc::dup(pair[0]) })));
+    }
+    // SAFETY: `fd` is the open socket.
+    step(
+        "setfl",
+        sys(unsafe { libc::fcntl(fd, libc::F_SETFL, libc::O_NONBLOCK) }),
+    );
+    let unix = (pair[0] >= 0).then(|| {
+        // SAFETY: `pair[0]` is open; the clone owns a new descriptor and `forget` keeps `pair[0]`.
+        let s = unsafe { std::os::unix::net::UnixStream::from_raw_fd(pair[0]) };
+        let clone = s.try_clone();
+        std::mem::forget(s);
+        clone
+    });
+    step(
+        "try_clone_unix",
+        match unix {
+            Some(Ok(_)) => Ok(0),
+            Some(Err(e)) => Err(e.raw_os_error().unwrap_or(-2)),
+            None => Err(-1),
+        },
+    );
+
+    // Whether kqueue reports a socket ready at all; ProsperoLight waits with sceNetEpoll instead.
+    let rx = UdpSocket::bind("127.0.0.1:0")?;
+    // SAFETY: no arguments.
+    let kq2 = sys(unsafe { libc::kqueue() });
+    if let Ok(kq2) = kq2 {
+        fds.push(kq2);
+        let _ = kevent_receipt(kq2, libc::EVFILT_READ, rx.as_raw_fd() as usize);
+        udp.send_to(&[1], rx.local_addr()?)?;
+        // SAFETY: an all-zero kevent is a valid value.
+        let mut event: libc::kevent = unsafe { std::mem::zeroed() };
+        let wait = libc::timespec {
+            tv_sec: 0,
+            tv_nsec: 500_000_000,
+        };
+        // SAFETY: no changes, one writable event, a readable timeout.
+        let n = sys(unsafe { libc::kevent(kq2, std::ptr::null(), 0, &mut event, 1, &wait) });
+        step(
+            "kq_fires",
+            match n {
+                Ok(1) if event.ident == rx.as_raw_fd() as usize => Ok(1),
+                Ok(_) => Err(libc::ETIMEDOUT),
+                Err(e) => Err(e),
+            },
+        );
+    }
+
+    for fd in fds.into_iter().filter(|&fd| fd >= 0) {
+        // SAFETY: each is an fd opened above and not used again.
+        unsafe { libc::close(fd) };
+    }
+
+    let os = |r: std::io::Result<tokio::runtime::Runtime>| r.map(|_| 0).map_err(|e| e.raw_os_error().unwrap_or(-2));
+    step("rt_bare", os(tokio::runtime::Builder::new_current_thread().build()));
+    step(
+        "rt_time",
+        os(tokio::runtime::Builder::new_current_thread().enable_time().build()),
+    );
+    step(
+        "rt_io",
+        os(tokio::runtime::Builder::new_current_thread().enable_io().build()),
+    );
+    step(
+        "rt_all",
+        os(tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(1)
+            .enable_all()
+            .build()),
+    );
+
+    let detail = lines.join(", ");
+    if failed {
+        bail!("{detail}");
+    }
+    ok(detail)
+}
+
+#[cfg(not(target_os = "freebsd"))]
+fn async_steps(_: &Ctx) -> Result<Outcome> {
+    Ok(Outcome::Skip("kqueue and SO_NBIO steps are the console's".into()))
 }
 
 /// UDP through quinn-udp, as core's media reader uses it: state, options, a batch round trip.
@@ -353,6 +654,78 @@ fn udp_rate(_: &Ctx) -> Result<Outcome> {
     ))
 }
 
+/// Socket buffers as core grows them (32 MiB each way): on the console, the cap and what each
+/// size gets past the wraps; then core's ask through them. Fails when the receive buffer stays
+/// at its default.
+fn sockbuf(_: &Ctx) -> Result<Outcome> {
+    use std::os::fd::AsRawFd;
+    let int_len = size_of::<libc::c_int>() as libc::socklen_t;
+    let get = |fd: libc::c_int, opt: libc::c_int| {
+        let (mut v, mut len): (libc::c_int, libc::socklen_t) = (0, int_len);
+        // SAFETY: `v` and `len` are writable and `len` holds the size of `v`.
+        unsafe { libc::getsockopt(fd, libc::SOL_SOCKET, opt, (&raw mut v).cast(), &mut len) };
+        v
+    };
+    let mut parts = Vec::new();
+    #[cfg(target_vendor = "sie")]
+    {
+        let (mut cap, mut len) = (0u64, size_of::<u64>());
+        // SAFETY: the name is NUL-terminated; `cap` is writable for `len` bytes.
+        let rc = unsafe {
+            libc::sysctlbyname(
+                c"kern.ipc.maxsockbuf".as_ptr(),
+                (&raw mut cap).cast(),
+                &mut len,
+                std::ptr::null_mut::<libc::c_void>() as _,
+                0,
+            )
+        };
+        parts.push(if rc == 0 {
+            format!("maxsockbuf {cap}")
+        } else {
+            format!("maxsockbuf errno {}", errno())
+        });
+        for size in [32 << 20, 4 << 20, 2 << 20, 1 << 20, 256 << 10] {
+            let s = UdpSocket::bind("127.0.0.1:0")?;
+            let size: libc::c_int = size;
+            // SAFETY: `s` is open; `size` is a readable int of `int_len` bytes.
+            let rc = unsafe {
+                __real_setsockopt(
+                    s.as_raw_fd(),
+                    libc::SOL_SOCKET,
+                    libc::SO_RCVBUF,
+                    (&raw const size).cast(),
+                    int_len,
+                )
+            };
+            let answer = if rc == 0 {
+                "ok".to_string()
+            } else {
+                format!("errno {}", errno())
+            };
+            parts.push(format!("raw {}K {answer}", size >> 10));
+        }
+    }
+    let udp = UdpSocket::bind("127.0.0.1:0")?;
+    let fd = udp.as_raw_fd();
+    let before = get(fd, libc::SO_RCVBUF);
+    let ask: libc::c_int = 32 << 20;
+    for opt in [libc::SO_RCVBUF, libc::SO_SNDBUF] {
+        // SAFETY: `fd` is open; `ask` is a readable int of `int_len` bytes.
+        unsafe { libc::setsockopt(fd, libc::SOL_SOCKET, opt, (&raw const ask).cast(), int_len) };
+    }
+    let rcv = get(fd, libc::SO_RCVBUF);
+    parts.push(format!(
+        "32M ask: rcv {before} -> {rcv}, snd {}",
+        get(fd, libc::SO_SNDBUF)
+    ));
+    let detail = parts.join(", ");
+    if rcv <= before {
+        bail!("{detail}");
+    }
+    ok(detail)
+}
+
 fn tokio_runtime(_: &Ctx) -> Result<Outcome> {
     let rt = tokio::runtime::Builder::new_multi_thread()
         .worker_threads(2)
@@ -383,7 +756,7 @@ fn host(ctx: &Ctx) -> Option<(&str, u16)> {
     ctx.config
         .host
         .as_deref()
-        .map(|h| (h, ctx.config.port.unwrap_or(47_989)))
+        .map(|h| (h, ctx.config.port.unwrap_or(pf_client_core::deeplink::DEFAULT_PORT)))
 }
 
 fn tcp_mgmt(ctx: &Ctx) -> Result<Outcome> {
@@ -409,7 +782,9 @@ fn quic_tls(ctx: &Ctx) -> Result<Outcome> {
     ok(format!("host fingerprint {:02x}{:02x}{:02x}…", fp[0], fp[1], fp[2]))
 }
 
-fn mdns(_: &Ctx) -> Result<Outcome> {
+/// Hosts the console's discovery finds in 4 s. With a host in `probe.json` one is on this
+/// network, so finding none fails.
+fn mdns(ctx: &Ctx) -> Result<Outcome> {
     let Some(mut d) = pf_ps5_app::services::discovery::Discovery::start() else {
         bail!("the mDNS daemon did not start");
     };
@@ -420,6 +795,11 @@ fn mdns(_: &Ctx) -> Result<Outcome> {
             seen.push(format!("{}@{}", h.name, h.addr));
         }
         std::thread::sleep(Duration::from_millis(100));
+    }
+    if seen.is_empty() {
+        if let Some(host) = ctx.config.host.as_deref() {
+            bail!("no host answered, though {host} is on this network");
+        }
     }
     ok(format!("{} host(s): {}", seen.len(), seen.join(", ")))
 }

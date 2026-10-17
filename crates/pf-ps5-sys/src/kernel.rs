@@ -16,6 +16,24 @@ pub const PROT_CPU_GPU_RW: i32 = 0x33;
 pub const PROT_CPU_W_GPU_RW: i32 = 0x32;
 pub const PROT_CPU_RW: i32 = 0x03;
 
+/// The system software version from `kern.sdk_version` (`0x13420000` is 13.42), or `None`
+/// where the sysctl is refused.
+#[cfg(target_os = "freebsd")]
+pub fn system_version() -> Option<u32> {
+    let (mut version, mut len) = (0u32, size_of::<u32>());
+    // SAFETY: the name is NUL-terminated; `version` is writable for `len` bytes.
+    let rc = unsafe {
+        libc::sysctlbyname(
+            c"kern.sdk_version".as_ptr(),
+            (&raw mut version).cast(),
+            &mut len,
+            core::ptr::null_mut::<c_void>() as _,
+            0,
+        )
+    };
+    (rc == 0 && version != 0).then_some(version)
+}
+
 /// Rounds `len` up to [`PAGE`].
 pub const fn page_align(len: usize) -> usize {
     (len + PAGE - 1) & !(PAGE - 1)

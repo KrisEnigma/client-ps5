@@ -85,6 +85,7 @@ const CHECKS: &[(&str, Check)] = &[
     ("files", files),
     ("entropy", entropy),
     ("hashmap-seed", hashmap_seed),
+    ("crypto", crypto),
     ("async-steps", async_steps),
     ("udp-quinn", udp_quinn),
     ("udp-rate", udp_rate),
@@ -276,6 +277,44 @@ fn hashmap_seed(_: &Ctx) -> Result<Outcome> {
     let mut m = HashMap::new();
     m.insert("a", 1);
     ok(format!("RandomState seeded ({} entry)", m.len()))
+}
+
+/// The key exchanges and ciphers the QUIC handshake and media use, through aws-lc as rustls
+/// calls it: its assembly read tables out of execute-only code (x25519 base).
+fn crypto(_: &Ctx) -> Result<Outcome> {
+    use aws_lc_rs::{aead, agreement, rand::SystemRandom};
+    let rng = SystemRandom::new();
+    let mut done = Vec::new();
+    for (name, alg) in [("x25519", &agreement::X25519), ("p256", &agreement::ECDH_P256)] {
+        let ours = agreement::EphemeralPrivateKey::generate(alg, &rng)?;
+        let theirs = agreement::EphemeralPrivateKey::generate(alg, &rng)?;
+        let their_public = theirs.compute_public_key()?;
+        let peer = agreement::UnparsedPublicKey::new(alg, their_public.as_ref());
+        let len = agreement::agree_ephemeral(ours, peer, aws_lc_rs::error::Unspecified, |k| Ok(k.len()))?;
+        done.push(format!("{name} {len} B"));
+    }
+    for (name, alg) in [
+        ("aes-256-gcm", &aead::AES_256_GCM),
+        ("chacha20", &aead::CHACHA20_POLY1305),
+    ] {
+        let key = aead::LessSafeKey::new(aead::UnboundKey::new(alg, &[7; 32])?);
+        let mut buf = vec![0u8; 1200];
+        key.seal_in_place_append_tag(
+            aead::Nonce::assume_unique_for_key([1; 12]),
+            aead::Aad::empty(),
+            &mut buf,
+        )?;
+        let plain = key.open_in_place(
+            aead::Nonce::assume_unique_for_key([1; 12]),
+            aead::Aad::empty(),
+            &mut buf,
+        )?;
+        if plain.iter().any(|&b| b != 0) {
+            bail!("{name} round trip changed the text");
+        }
+        done.push(name.to_string());
+    }
+    ok(done.join(", "))
 }
 
 #[cfg(target_vendor = "sie")]

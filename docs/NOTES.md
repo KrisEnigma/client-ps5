@@ -76,6 +76,22 @@ logs `probe-20261017-015745.log` and `probe-20261017-031128.log`, menu bundle
   names the path.
 - **Open:** `mdns` found no host in 4 s on any run, while the host answered over TCP.
 
+## Proven on the console (round 2, 2026-10-17)
+
+Same console and host, build 4a8d225. Evidence: probe log `probe-20261017-201422.log`, menu
+bundle `PPSA99724/1792279851`, kernel log `klog-20261017-round2.txt`.
+
+- **UI layer:** Skia on Vulkan draws the menu at ~100 fps, under 1 ms of CPU a frame.
+- **Socket buffers:** a 32 MiB `SO_RCVBUF` fails with ENOBUFS, 4 MiB and below are accepted, and
+  core's 32 MiB ask through the step-down wrap reads back 512 KiB both ways.
+  `kern.ipc.maxsockbuf` is not readable from a title.
+- **Videodec2:** H.264 at 4K120 decodes in 9-17 ms against an 8.3 ms period; the queue it
+  leaves is flushed every 2 s and core reads each flush as congestion, down to 2 Mbit/s. HEVC
+  at 4K60 decodes in 12-15 ms at 15-20 Mbit/s, with no plane-set misses.
+- **PyroWave** at 4K120 arrives at 499 Mbit/s with no loss; that rate was the client's own
+  ceiling (200 Mbit/s, under PyroWave's 0.5 bit/pixel floor), not the console's.
+- **mDNS:** binding UDP 5353 fails with EACCES, so mdns-sd's daemon has no socket.
+
 ## Console facts the code relies on (sourced, not yet proven)
 
 Sources: ProsperoLight (PL), PS5_Vulkan (VK), PS5_VulkanTemplate (TPL), the payload SDK (SDK),

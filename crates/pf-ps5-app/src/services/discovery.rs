@@ -1,8 +1,15 @@
-//! LAN discovery via mDNS. Direct mdns-sd dep to avoid pf-client-core's FFmpeg/PipeWire.
-use mdns_sd::{ServiceDaemon, ServiceEvent};
+//! LAN discovery by mDNS legacy unicast (RFC 6762 §6.7): a PTR query from an ephemeral port,
+//! which responders answer straight back to that port. A title may not bind UDP 5353 (EACCES,
+//! `docs/NOTES.md`), which a full mDNS daemon needs. `ProsperoLight` discovers its hosts the same
+//! way (`src/moonlight_discovery.cpp:266-323`), and the host's responder answers such queries.
+use std::collections::{HashMap, HashSet};
+use std::net::{Ipv4Addr, SocketAddrV4, UdpSocket};
+use std::time::{Duration, Instant};
 
 /// mDNS service type punktfunk hosts advertise.
 const SERVICE_TYPE: &str = "_punktfunk._udp.local.";
+
+const MDNS_GROUP: SocketAddrV4 = SocketAddrV4::new(Ipv4Addr::new(224, 0, 0, 251), 5353);
 
 #[derive(Clone, Debug)]
 pub struct DiscoveredHost {
@@ -18,31 +25,6 @@ pub struct DiscoveredHost {
     /// The advertised certificate fingerprint, lowercase hex; empty without one. An advert is
     /// unauthenticated: only the host's approval of this console makes it a pairing.
     pub fp_hex: String,
-}
-
-/// IPv4 address and short instance name from a resolved record. IPv4 only (same as other
-/// clients).
-///
-/// The resolved set is a union of every responder's answer, so a host on a VPN or overlay
-/// network contributes addresses we may not be able to route. Ranking is
-/// `punktfunk_core::discovery`'s, shared with the desktop and Android clients: picking
-/// arbitrarily out of the set re-rolled the dial address on every re-announce.
-fn addr_and_name(info: &mdns_sd::ResolvedService) -> Option<(String, String)> {
-    let candidates: Vec<std::net::Ipv4Addr> = info.get_addresses_v4().iter().copied().collect();
-    // Advisory TXT: the host names which address its advert is for. Absent on older hosts,
-    // where the ranking's remaining rungs still settle the tie.
-    let declared = info
-        .get_properties()
-        .get_property_val_str("addr")
-        .and_then(|v| v.parse().ok());
-    let Some(addr) = punktfunk_core::discovery::pick_host_addr(&candidates, declared) else {
-        tracing::warn!("mdns: resolved {} with no IPv4 address, skipping", info.get_fullname());
-        return None;
-    };
-    Some((
-        addr.to_string(),
-        info.get_fullname().split('.').next().unwrap_or("?").to_string(),
-    ))
 }
 
 /// Trims an advertised OS chain to something bounded and predictable: lowercase, at most five
@@ -85,105 +67,251 @@ fn advertised_fp(fp: Option<&str>) -> String {
     fp.and_then(shared::parse_fp).map(shared::hex).unwrap_or_default()
 }
 
-/// Turns a resolved record into a host, or `None` if it isn't usable (no IPv4).
-fn parse_discovery(info: &mdns_sd::ResolvedService) -> Option<DiscoveredHost> {
-    let (addr, name) = addr_and_name(info)?;
-    let props = info.get_properties();
-    let (mgmt_port, mac, os) = txt_fields(
-        props.get_property_val_str("mgmt"),
-        props.get_property_val_str("mac"),
-        props.get_property_val_str("os"),
-    );
-    Some(DiscoveredHost {
-        name,
-        addr,
-        port: info.get_port(),
-        mgmt_port,
-        mac,
-        os,
-        fp_hex: advertised_fp(props.get_property_val_str("fp")),
-    })
-}
-
-/// mdns-sd doubles its PTR re-query interval every round (1s, 2s ... capped at an hour) and
-/// discards a whole incoming message on any parse error, so answers lost inside one malformed
-/// packet can leave the list empty for minutes. Restarting resets that backoff, but also its
-/// traffic-quieting — hence this long, not shorter.
-const REBROWSE_INTERVAL: std::time::Duration = std::time::Duration::from_secs(120);
-
-/// A running browse for punktfunk hosts, drained from the menu tick. No thread of its own —
-/// mdns-sd's daemon already runs one. That daemon re-queries on its own timers, so what keeps
-/// discovery off the network during a stream is `console::model::Service` dropping this (and
-/// with it the daemon) when the menu loop exits, not the tick.
-pub struct Discovery {
-    daemon: ServiceDaemon,
-    events: mdns_sd::Receiver<ServiceEvent>,
-    last_browse: std::time::Instant,
-}
-
-impl Drop for Discovery {
-    fn drop(&mut self) {
-        let _ = self.daemon.shutdown();
+/// The question every round asks: PTR for [`SERVICE_TYPE`], class IN with the unicast-response
+/// bit, from a querier whose source port alone already makes the answer unicast.
+fn query() -> Vec<u8> {
+    // ID 0, standard query, one question.
+    let mut q = vec![0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0];
+    for label in SERVICE_TYPE.trim_end_matches('.').split('.') {
+        q.push(label.len() as u8);
+        q.extend_from_slice(label.as_bytes());
     }
+    q.extend_from_slice(&[0, 0, 12, 0x80, 0x01]);
+    q
+}
+
+/// The records of one or more answers, owner names lowercased (DNS compares them so).
+#[derive(Default)]
+struct Records {
+    /// (owner, target) of each PTR.
+    ptr: Vec<(String, String)>,
+    /// Instance → (port, target host).
+    srv: HashMap<String, (u16, String)>,
+    /// Instance → TXT keys (lowercased) and values.
+    txt: HashMap<String, HashMap<String, String>>,
+    /// Host → IPv4 addresses.
+    a: HashMap<String, Vec<Ipv4Addr>>,
+}
+
+fn be16(msg: &[u8], at: usize) -> Option<usize> {
+    Some(usize::from(u16::from_be_bytes([*msg.get(at)?, *msg.get(at + 1)?])))
+}
+
+/// The name at `start` as dotted text with a trailing dot, and where the record goes on after
+/// it. Follows compression pointers, a bounded number of them.
+fn read_name(msg: &[u8], start: usize) -> Option<(String, usize)> {
+    let mut name = String::new();
+    let mut pos = start;
+    let mut after = None;
+    for _ in 0..128 {
+        let len = usize::from(*msg.get(pos)?);
+        match len & 0xc0 {
+            0xc0 => {
+                after.get_or_insert(pos + 2);
+                pos = ((len & 0x3f) << 8) | usize::from(*msg.get(pos + 1)?);
+            }
+            0 if len == 0 => {
+                name.push('.');
+                return Some((name, after.unwrap_or(pos + 1)));
+            }
+            0 => {
+                if !name.is_empty() {
+                    name.push('.');
+                }
+                name.push_str(&String::from_utf8_lossy(msg.get(pos + 1..pos + 1 + len)?));
+                pos += 1 + len;
+            }
+            _ => return None,
+        }
+    }
+    None
+}
+
+/// TXT strings as `key=value` (a bare key reads as empty), keys lowercased.
+fn txt_strings(mut rdata: &[u8]) -> HashMap<String, String> {
+    let mut out = HashMap::new();
+    while let Some((&len, rest)) = rdata.split_first() {
+        let Some(s) = rest.get(..usize::from(len)) else { break };
+        let s = String::from_utf8_lossy(s);
+        let (k, v) = s.split_once('=').unwrap_or((&s, ""));
+        if !k.is_empty() {
+            out.entry(k.to_ascii_lowercase()).or_insert_with(|| v.to_string());
+        }
+        rdata = &rest[usize::from(len)..];
+    }
+    out
+}
+
+impl Records {
+    /// Folds in one mDNS response; anything else (a query, a truncated packet) adds nothing.
+    fn add(&mut self, msg: &[u8]) -> Option<()> {
+        if be16(msg, 2)? & 0x8000 == 0 {
+            return None;
+        }
+        let (questions, records) = (be16(msg, 4)?, be16(msg, 6)? + be16(msg, 8)? + be16(msg, 10)?);
+        let mut pos = 12;
+        for _ in 0..questions {
+            pos = read_name(msg, pos)?.1 + 4;
+        }
+        for _ in 0..records {
+            let (owner, p) = read_name(msg, pos)?;
+            let (rtype, len) = (be16(msg, p)?, be16(msg, p + 8)?);
+            let at = p + 10;
+            let rdata = msg.get(at..at + len)?;
+            let owner = owner.to_ascii_lowercase();
+            match rtype {
+                1 if len == 4 => {
+                    let ip = Ipv4Addr::new(rdata[0], rdata[1], rdata[2], rdata[3]);
+                    let ips = self.a.entry(owner).or_default();
+                    if !ips.contains(&ip) {
+                        ips.push(ip);
+                    }
+                }
+                12 => {
+                    if let Some((target, _)) = read_name(msg, at) {
+                        let ptr = (owner, target);
+                        if !self.ptr.contains(&ptr) {
+                            self.ptr.push(ptr);
+                        }
+                    }
+                }
+                16 => {
+                    self.txt.insert(owner, txt_strings(rdata));
+                }
+                33 if len >= 6 => {
+                    if let Some((target, _)) = read_name(msg, at + 6) {
+                        let port = u16::from_be_bytes([rdata[4], rdata[5]]);
+                        self.srv.insert(owner, (port, target.to_ascii_lowercase()));
+                    }
+                }
+                _ => {}
+            }
+            pos = at + len;
+        }
+        Some(())
+    }
+
+    /// Every advertised instance the records resolve to an address and a port, as
+    /// `(instance, host)`.
+    fn hosts(&self) -> Vec<(String, DiscoveredHost)> {
+        let service = SERVICE_TYPE.to_ascii_lowercase();
+        let mut out = Vec::new();
+        for (owner, instance) in &self.ptr {
+            if *owner != service {
+                continue;
+            }
+            let key = instance.to_ascii_lowercase();
+            let Some((port, target)) = self.srv.get(&key) else {
+                continue;
+            };
+            let candidates = self.a.get(target).map(Vec::as_slice).unwrap_or_default();
+            let empty = HashMap::new();
+            let txt = self.txt.get(&key).unwrap_or(&empty);
+            let get = |k: &str| txt.get(k).map(String::as_str);
+            // Advisory TXT: the host names which address its advert is for. The ranking is
+            // `punktfunk_core::discovery`'s, shared with the desktop and Android clients.
+            let declared = get("addr").and_then(|v| v.parse().ok());
+            let Some(addr) = punktfunk_core::discovery::pick_host_addr(candidates, declared) else {
+                continue;
+            };
+            let (mgmt_port, mac, os) = txt_fields(get("mgmt"), get("mac"), get("os"));
+            out.push((
+                key,
+                DiscoveredHost {
+                    name: instance.split('.').next().unwrap_or("?").to_string(),
+                    addr: addr.to_string(),
+                    port: *port,
+                    mgmt_port,
+                    mac,
+                    os,
+                    fp_hex: advertised_fp(get("fp")),
+                },
+            ));
+        }
+        out
+    }
+}
+
+/// The first re-query; each later one waits twice as long, up to [`QUERY_MAX`].
+const QUERY_FIRST: Duration = Duration::from_secs(1);
+const QUERY_MAX: Duration = Duration::from_secs(16);
+
+/// A running browse for punktfunk hosts, drained from the menu tick. No thread of its own:
+/// each [`poll`](Self::poll) reads what has arrived and re-asks when due. What keeps discovery
+/// off the network during a stream is `console::model::Service` dropping this when the menu
+/// loop exits.
+pub struct Discovery {
+    socket: UdpSocket,
+    records: Records,
+    /// Instances already handed out since the last query.
+    reported: HashSet<String>,
+    next_query: Instant,
+    interval: Duration,
 }
 
 impl Discovery {
-    /// `None` if the daemon or initial browse won't start — discovery is then simply absent.
+    /// `None` if the socket won't open or the first query won't send: discovery is then
+    /// simply absent.
     pub fn start() -> Option<Self> {
-        let daemon = ServiceDaemon::new()
-            .inspect_err(|e| tracing::error!("mdns: ServiceDaemon::new failed: {e}"))
+        let socket = UdpSocket::bind((Ipv4Addr::UNSPECIFIED, 0))
+            .and_then(|s| s.set_nonblocking(true).map(|()| s))
+            .inspect_err(|e| tracing::error!("mdns: no query socket: {e}"))
             .ok()?;
-        let events = match daemon.browse(SERVICE_TYPE) {
-            Ok(events) => events,
-            Err(e) => {
-                // The daemon's thread outlives its handle, so a failed start still has to stop it.
-                tracing::error!("mdns: browse({SERVICE_TYPE}) failed: {e}");
-                let _ = daemon.shutdown();
-                return None;
-            }
+        let mut d = Self {
+            socket,
+            records: Records::default(),
+            reported: HashSet::new(),
+            next_query: Instant::now(),
+            interval: QUERY_FIRST,
         };
-        tracing::debug!("mdns: browsing {SERVICE_TYPE}");
-        Some(Self {
-            daemon,
-            events,
-            last_browse: std::time::Instant::now(),
-        })
+        d.ask()
+            .inspect_err(|e| tracing::error!("mdns: query for {SERVICE_TYPE} failed: {e}"))
+            .ok()?;
+        tracing::debug!("mdns: asking for {SERVICE_TYPE} from {:?}", d.socket.local_addr());
+        Some(d)
     }
 
-    /// Hosts resolved since the last call, restarting the browse when due. Empty on almost
-    /// every tick, which costs no allocation.
+    /// Sends the question again and starts a fresh set of answers, so a host that moved or
+    /// left is not reported from old records.
+    fn ask(&mut self) -> std::io::Result<()> {
+        self.socket.send_to(&query(), MDNS_GROUP)?;
+        self.records = Records::default();
+        self.reported.clear();
+        self.next_query = Instant::now() + self.interval;
+        self.interval = (self.interval * 2).min(QUERY_MAX);
+        Ok(())
+    }
+
+    /// Hosts resolved since the last call, re-asking when due. Empty on almost every tick.
     pub fn poll(&mut self) -> Vec<DiscoveredHost> {
-        let mut found = Vec::new();
-        while let Ok(event) = self.events.try_recv() {
-            let ServiceEvent::ServiceResolved(info) = event else {
-                tracing::debug!("mdns: {event:?}");
-                continue;
-            };
-            let Some(host) = parse_discovery(&info) else {
-                continue;
-            };
-            tracing::info!("mdns: resolved {} at {}:{}", host.name, host.addr, host.port);
-            found.push(host);
+        if Instant::now() >= self.next_query {
+            if let Err(e) = self.ask() {
+                tracing::debug!("mdns: re-query failed: {e}");
+            }
         }
-        // After the drain, not before: re-browsing swaps the receiver out and whatever it still
-        // held goes with it.
-        if self.last_browse.elapsed() >= REBROWSE_INTERVAL {
-            self.rebrowse();
+        let mut buf = [0u8; 9000];
+        let mut heard = false;
+        loop {
+            match self.socket.recv_from(&mut buf) {
+                Ok((n, _)) => heard |= self.records.add(&buf[..n]).is_some(),
+                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => break,
+                Err(e) => {
+                    tracing::debug!("mdns: read failed: {e}");
+                    break;
+                }
+            }
+        }
+        if !heard {
+            return Vec::new();
+        }
+        let mut found = Vec::new();
+        for (key, host) in self.records.hosts() {
+            if self.reported.insert(key) {
+                tracing::info!("mdns: resolved {} at {}:{}", host.name, host.addr, host.port);
+                found.push(host);
+            }
         }
         found
-    }
-
-    fn rebrowse(&mut self) {
-        // Without the stop, the old retransmission chain keeps running and they stack one per
-        // interval. It also drops the cache, which is what makes hosts resolve from scratch.
-        let _ = self.daemon.stop_browse(SERVICE_TYPE);
-        match self.daemon.browse(SERVICE_TYPE) {
-            Ok(events) => self.events = events,
-            // The stop already removed the querier, so nothing more arrives until the
-            // next interval retries this.
-            Err(e) => tracing::error!("mdns: re-browse({SERVICE_TYPE}) failed: {e}"),
-        }
-        self.last_browse = std::time::Instant::now();
     }
 }
 
@@ -218,5 +346,90 @@ mod tests {
         assert_eq!(advertised_fp(Some("0c61")), "");
         assert_eq!(advertised_fp(Some(&"zz".repeat(32))), "");
         assert_eq!(advertised_fp(None), "");
+    }
+
+    /// `ProsperoLight`'s query with our service name: ID 0, one question, PTR, IN plus the
+    /// unicast-response bit.
+    #[test]
+    fn the_query_asks_for_a_unicast_ptr() {
+        let mut want = vec![0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0];
+        want.extend_from_slice(b"\x0a_punktfunk\x04_udp\x05local\x00");
+        want.extend_from_slice(&[0, 12, 0x80, 0x01]);
+        assert_eq!(query(), want);
+    }
+
+    fn record(out: &mut Vec<u8>, owner: &[u8], rtype: u16, rdata: &[u8]) {
+        out.extend_from_slice(owner);
+        out.extend_from_slice(&rtype.to_be_bytes());
+        out.extend_from_slice(&[0, 1, 0, 0, 0, 10]);
+        out.extend_from_slice(&(rdata.len() as u16).to_be_bytes());
+        out.extend_from_slice(rdata);
+    }
+
+    /// A legacy unicast answer as mdns-sd sends one: the question echoed, the PTR, then SRV,
+    /// TXT and A as additionals, names compressed against earlier ones.
+    fn answer() -> Vec<u8> {
+        let mut m = vec![0, 0, 0x84, 0, 0, 1, 0, 1, 0, 0, 0, 3];
+        // Question at 12: "_punktfunk._udp.local." PTR.
+        m.extend_from_slice(b"\x0a_punktfunk\x04_udp\x05local\x00");
+        m.extend_from_slice(&[0, 12, 0, 1]);
+        // PTR → "PC._punktfunk._udp.local." (instance label, then a pointer to offset 12).
+        let instance_at = m.len() + 2 + 10;
+        record(&mut m, &[0xc0, 12], 12, b"\x02PC\xc0\x0c");
+        // SRV for the instance: port 9777, target "pc.local." ("pc", then "local" at 28).
+        let mut srv = vec![0, 0, 0, 0, 0x26, 0x31];
+        srv.extend_from_slice(b"\x02pc\xc0\x1c");
+        let instance = [0xc0, instance_at as u8];
+        let target_at = m.len() + 2 + 10 + 6;
+        record(&mut m, &instance, 33, &srv);
+        record(
+            &mut m,
+            &instance,
+            16,
+            b"\x0amgmt=47990\x08os=Linux\x10addr=192.168.0.9\x03odd",
+        );
+        record(&mut m, &[0xc0, target_at as u8], 1, &[192, 168, 0, 9]);
+        m
+    }
+
+    #[test]
+    fn a_legacy_answer_resolves_to_a_host() {
+        let mut r = Records::default();
+        assert!(r.add(&answer()).is_some());
+        let hosts = r.hosts();
+        assert_eq!(hosts.len(), 1);
+        let (key, h) = &hosts[0];
+        assert_eq!(key, "pc._punktfunk._udp.local.");
+        assert_eq!(h.name, "PC");
+        assert_eq!(h.port, 9777);
+        assert_eq!(h.addr, "192.168.0.9");
+        assert_eq!(h.mgmt_port, Some(47990));
+        assert_eq!(h.os, "linux");
+    }
+
+    #[test]
+    fn queries_and_broken_packets_add_nothing() {
+        let mut r = Records::default();
+        assert!(r.add(&query()).is_none(), "a query is not an answer");
+        let a = answer();
+        for cut in [3, 12, 20, a.len() - 1] {
+            let _ = r.add(&a[..cut]);
+        }
+        assert!(r.hosts().is_empty());
+        // A pointer that points at itself ends, it does not spin.
+        assert!(read_name(&[0xc0, 0], 0).is_none());
+    }
+
+    #[test]
+    fn an_answer_split_across_packets_still_resolves() {
+        let a = answer();
+        let mut first = a.clone();
+        // Same packet with only the question and PTR: SRV/TXT/A come in the next one.
+        first[11] = 0;
+        let mut r = Records::default();
+        r.add(&first);
+        assert!(r.hosts().is_empty());
+        r.add(&a);
+        assert_eq!(r.hosts().len(), 1);
     }
 }

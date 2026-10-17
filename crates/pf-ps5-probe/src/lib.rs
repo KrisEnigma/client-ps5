@@ -85,6 +85,7 @@ const CHECKS: &[(&str, Check)] = &[
     ("files", files),
     ("entropy", entropy),
     ("hashmap-seed", hashmap_seed),
+    ("async-steps", async_steps),
     ("udp-quinn", udp_quinn),
     ("udp-rate", udp_rate),
     ("tokio", tokio_runtime),
@@ -275,6 +276,253 @@ fn hashmap_seed(_: &Ctx) -> Result<Outcome> {
     let mut m = HashMap::new();
     m.insert("a", 1);
     ok(format!("RandomState seeded ({} entry)", m.len()))
+}
+
+#[cfg(target_vendor = "sie")]
+extern "C" {
+    fn __real_fcntl(fd: libc::c_int, cmd: libc::c_int, ...) -> libc::c_int;
+    fn __real_ioctl(fd: libc::c_int, request: libc::c_ulong, ...) -> libc::c_int;
+}
+
+#[cfg(target_os = "freebsd")]
+fn errno() -> i32 {
+    std::io::Error::last_os_error().raw_os_error().unwrap_or(0)
+}
+
+#[cfg(target_os = "freebsd")]
+fn sys(rc: libc::c_int) -> Result<libc::c_int, i32> {
+    if rc >= 0 {
+        Ok(rc)
+    } else {
+        Err(errno())
+    }
+}
+
+/// One change through `kevent` with `EV_RECEIPT`, as mio registers: the error comes back in the
+/// receipt, not the return value.
+#[cfg(target_os = "freebsd")]
+fn kevent_receipt(kq: libc::c_int, filter: i16, ident: usize) -> Result<libc::c_int, i32> {
+    // SAFETY: an all-zero kevent is a valid value.
+    let mut change: libc::kevent = unsafe { std::mem::zeroed() };
+    change.ident = ident;
+    change.filter = filter;
+    change.flags = libc::EV_ADD | libc::EV_CLEAR | libc::EV_RECEIPT;
+    let mut receipt = change;
+    let zero = libc::timespec { tv_sec: 0, tv_nsec: 0 };
+    // SAFETY: one readable change, one writable receipt, a readable timeout.
+    let n = sys(unsafe { libc::kevent(kq, &change, 1, &mut receipt, 1, &zero) })?;
+    if n == 1 && receipt.flags & libc::EV_ERROR != 0 && receipt.data != 0 {
+        return Err(receipt.data as i32);
+    }
+    Ok(0)
+}
+
+/// Each step tokio, mio, socket2 and quinn-udp take on a socket or kqueue, with its errno:
+/// which one the console refuses. `std` steps go through the title's `fcntl`/`ioctl` wraps.
+#[cfg(target_os = "freebsd")]
+fn async_steps(_: &Ctx) -> Result<Outcome> {
+    use std::os::fd::{AsRawFd, FromRawFd};
+    let mut lines = Vec::new();
+    let mut failed = false;
+    let mut fds = Vec::new();
+    let mut step = |name: &str, r: Result<libc::c_int, i32>| {
+        match r {
+            Ok(_) => lines.push(format!("{name} ok")),
+            Err(e) => {
+                failed = true;
+                lines.push(format!("{name} errno {e}"));
+            }
+        }
+        r.unwrap_or(-1)
+    };
+
+    let udp = UdpSocket::bind("127.0.0.1:0")?;
+    let fd = udp.as_raw_fd();
+    step("fionbio", udp.set_nonblocking(true).map(|()| 0).map_err(|_| errno()));
+    // SAFETY: `fd` is the open socket above.
+    step("getfl", sys(unsafe { libc::fcntl(fd, libc::F_GETFL) }));
+    let one: libc::c_int = 1;
+    for (name, level, opt) in [
+        ("ip_recvtos", libc::IPPROTO_IP, libc::IP_RECVTOS),
+        ("ip_dontfrag", libc::IPPROTO_IP, libc::IP_DONTFRAG),
+        ("ip_recvdstaddr", libc::IPPROTO_IP, libc::IP_RECVDSTADDR),
+    ] {
+        let len = size_of::<libc::c_int>() as libc::socklen_t;
+        // SAFETY: `one` is a readable int of `len` bytes.
+        step(
+            name,
+            sys(unsafe { libc::setsockopt(fd, level, opt, (&raw const one).cast(), len) }),
+        );
+    }
+
+    // SAFETY: no arguments.
+    let kq = step("kqueue", sys(unsafe { libc::kqueue() }));
+    if kq >= 0 {
+        fds.push(kq);
+        // SAFETY: `kq` is the open kqueue above.
+        step(
+            "kq_cloexec",
+            sys(unsafe { libc::fcntl(kq, libc::F_SETFD, libc::FD_CLOEXEC) }),
+        );
+        step("kevent_user", kevent_receipt(kq, libc::EVFILT_USER, 0));
+        step("kevent_read", kevent_receipt(kq, libc::EVFILT_READ, fd as usize));
+        step("kevent_write", kevent_receipt(kq, libc::EVFILT_WRITE, fd as usize));
+        // tokio's I/O driver clones mio's kqueue (`Registry::try_clone`).
+        #[cfg(target_vendor = "sie")]
+        {
+            // SAFETY: `kq` is the open kqueue.
+            fds.push(step(
+                "raw_dupfd_kq",
+                sys(unsafe { __real_fcntl(kq, libc::F_DUPFD_CLOEXEC, 3) }),
+            ));
+            // SAFETY: as above.
+            fds.push(step("raw_dup_kq", sys(unsafe { libc::dup(kq) })));
+        }
+        // SAFETY: `kq` stays open in `fds`; `forget` keeps the borrowed one from closing it.
+        let borrowed = std::mem::ManuallyDrop::new(unsafe { std::os::fd::OwnedFd::from_raw_fd(kq) });
+        let clone = borrowed.try_clone();
+        step(
+            "kq_try_clone",
+            clone.as_ref().map(|_| 0).map_err(|e| e.raw_os_error().unwrap_or(-2)),
+        );
+        drop(clone);
+        step(
+            "kq_after_clone_drop",
+            kevent_receipt(kq, libc::EVFILT_WRITE, fd as usize),
+        );
+    }
+
+    let flags = libc::SOCK_NONBLOCK | libc::SOCK_CLOEXEC;
+    // SAFETY: plain socket creation.
+    fds.push(step(
+        "tcp_nb_cloexec",
+        sys(unsafe { libc::socket(libc::AF_INET, libc::SOCK_STREAM | flags, 0) }),
+    ));
+    // SAFETY: plain socket creation.
+    fds.push(step(
+        "udp_nb_cloexec",
+        sys(unsafe { libc::socket(libc::AF_INET, libc::SOCK_DGRAM | flags, 0) }),
+    ));
+    // SAFETY: plain socket creation.
+    fds.push(step(
+        "tcp_plain",
+        sys(unsafe { libc::socket(libc::AF_INET, libc::SOCK_STREAM, 0) }),
+    ));
+    let mut pair = [-1; 2];
+    // SAFETY: `pair` is writable for two fds.
+    step(
+        "unix_pair_nb_cloexec",
+        sys(unsafe { libc::socketpair(libc::AF_UNIX, libc::SOCK_STREAM | flags, 0, pair.as_mut_ptr()) }),
+    );
+    fds.extend(pair);
+
+    // The console's own answers, past the title's wraps, then the same calls through them.
+    #[cfg(target_vendor = "sie")]
+    {
+        let mut on: libc::c_int = 1;
+        // SAFETY: `fd` is the open socket; FIONBIO reads the int.
+        step(
+            "raw_fionbio",
+            sys(unsafe { __real_ioctl(fd, libc::FIONBIO, &raw mut on) }),
+        );
+        // SAFETY: `fd` is the open socket.
+        step(
+            "raw_setfl",
+            sys(unsafe { __real_fcntl(fd, libc::F_SETFL, libc::O_NONBLOCK) }),
+        );
+        // SAFETY: `fd` is the open socket.
+        step(
+            "raw_setfd",
+            sys(unsafe { __real_fcntl(fd, libc::F_SETFD, libc::FD_CLOEXEC) }),
+        );
+        // SAFETY: `pair[0]` is the open unix socket (or -1, which fails).
+        fds.push(step(
+            "raw_dupfd_unix",
+            sys(unsafe { __real_fcntl(pair[0], libc::F_DUPFD_CLOEXEC, 3) }),
+        ));
+        // SAFETY: as above.
+        fds.push(step("raw_dup_unix", sys(unsafe { libc::dup(pair[0]) })));
+    }
+    // SAFETY: `fd` is the open socket.
+    step(
+        "setfl",
+        sys(unsafe { libc::fcntl(fd, libc::F_SETFL, libc::O_NONBLOCK) }),
+    );
+    let unix = (pair[0] >= 0).then(|| {
+        // SAFETY: `pair[0]` is open; the clone owns a new descriptor and `forget` keeps `pair[0]`.
+        let s = unsafe { std::os::unix::net::UnixStream::from_raw_fd(pair[0]) };
+        let clone = s.try_clone();
+        std::mem::forget(s);
+        clone
+    });
+    step(
+        "try_clone_unix",
+        match unix {
+            Some(Ok(_)) => Ok(0),
+            Some(Err(e)) => Err(e.raw_os_error().unwrap_or(-2)),
+            None => Err(-1),
+        },
+    );
+
+    // Whether kqueue reports a socket ready at all; ProsperoLight waits with sceNetEpoll instead.
+    let rx = UdpSocket::bind("127.0.0.1:0")?;
+    // SAFETY: no arguments.
+    let kq2 = sys(unsafe { libc::kqueue() });
+    if let Ok(kq2) = kq2 {
+        fds.push(kq2);
+        let _ = kevent_receipt(kq2, libc::EVFILT_READ, rx.as_raw_fd() as usize);
+        udp.send_to(&[1], rx.local_addr()?)?;
+        // SAFETY: an all-zero kevent is a valid value.
+        let mut event: libc::kevent = unsafe { std::mem::zeroed() };
+        let wait = libc::timespec {
+            tv_sec: 0,
+            tv_nsec: 500_000_000,
+        };
+        // SAFETY: no changes, one writable event, a readable timeout.
+        let n = sys(unsafe { libc::kevent(kq2, std::ptr::null(), 0, &mut event, 1, &wait) });
+        step(
+            "kq_fires",
+            match n {
+                Ok(1) if event.ident == rx.as_raw_fd() as usize => Ok(1),
+                Ok(_) => Err(libc::ETIMEDOUT),
+                Err(e) => Err(e),
+            },
+        );
+    }
+
+    for fd in fds.into_iter().filter(|&fd| fd >= 0) {
+        // SAFETY: each is an fd opened above and not used again.
+        unsafe { libc::close(fd) };
+    }
+
+    let os = |r: std::io::Result<tokio::runtime::Runtime>| r.map(|_| 0).map_err(|e| e.raw_os_error().unwrap_or(-2));
+    step("rt_bare", os(tokio::runtime::Builder::new_current_thread().build()));
+    step(
+        "rt_time",
+        os(tokio::runtime::Builder::new_current_thread().enable_time().build()),
+    );
+    step(
+        "rt_io",
+        os(tokio::runtime::Builder::new_current_thread().enable_io().build()),
+    );
+    step(
+        "rt_all",
+        os(tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(1)
+            .enable_all()
+            .build()),
+    );
+
+    let detail = lines.join(", ");
+    if failed {
+        bail!("{detail}");
+    }
+    ok(detail)
+}
+
+#[cfg(not(target_os = "freebsd"))]
+fn async_steps(_: &Ctx) -> Result<Outcome> {
+    Ok(Outcome::Skip("kqueue and SO_NBIO steps are the console's".into()))
 }
 
 /// UDP through quinn-udp, as core's media reader uses it: state, options, a batch round trip.

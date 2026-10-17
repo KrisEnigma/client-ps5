@@ -270,7 +270,7 @@ mod gpu {
                 dev.device.handle().as_raw() as _,
                 (dev.queue.as_raw() as _, dev.qf as usize),
                 &get_proc,
-                Some(skvk::Version::from(dev.api_version)),
+                Some(skvk::Version::from(crate::device::INSTANCE_API_VERSION)),
             );
             // SAFETY: the handles belong to `dev`, which outlives this context; Skia does not
             // take ownership of them.

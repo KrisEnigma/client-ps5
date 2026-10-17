@@ -11,6 +11,10 @@ use anyhow::{anyhow, Context, Result};
 use ash::vk::{self, Handle as _};
 use pf_client_video::video_vk::{QueueLock, VulkanDecodeDevice};
 
+/// The Vulkan version the instance declares. Skia validates its function table against the
+/// version it is handed: the device's own (1.4 on RADV and lavapipe) fails that check.
+pub const INSTANCE_API_VERSION: u32 = vk::API_VERSION_1_3;
+
 /// What the device presents to.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Target {
@@ -93,7 +97,7 @@ impl GpuDevice {
         };
         let app = vk::ApplicationInfo::default()
             .application_name(c"punktfunk-ps5")
-            .api_version(vk::API_VERSION_1_3);
+            .api_version(INSTANCE_API_VERSION);
         let ptrs: Vec<*const std::ffi::c_char> = instance_exts.iter().map(|n| n.as_ptr()).collect();
         // SAFETY: the create-info and the names it borrows outlive the call; the instance is
         // owned by the returned value and destroyed in `Drop`.

@@ -780,7 +780,9 @@ fn quic_tls(ctx: &Ctx) -> Result<Outcome> {
     ok(format!("host fingerprint {:02x}{:02x}{:02x}…", fp[0], fp[1], fp[2]))
 }
 
-fn mdns(_: &Ctx) -> Result<Outcome> {
+/// Hosts the console's discovery finds in 4 s. With a host in `probe.json` one is on this
+/// network, so finding none fails.
+fn mdns(ctx: &Ctx) -> Result<Outcome> {
     let Some(mut d) = pf_ps5_app::services::discovery::Discovery::start() else {
         bail!("the mDNS daemon did not start");
     };
@@ -791,6 +793,11 @@ fn mdns(_: &Ctx) -> Result<Outcome> {
             seen.push(format!("{}@{}", h.name, h.addr));
         }
         std::thread::sleep(Duration::from_millis(100));
+    }
+    if seen.is_empty() {
+        if let Some(host) = ctx.config.host.as_deref() {
+            bail!("no host answered, though {host} is on this network");
+        }
     }
     ok(format!("{} host(s): {}", seen.len(), seen.join(", ")))
 }

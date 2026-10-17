@@ -176,3 +176,78 @@ unsafe extern "Rust" fn __getrandom_v03_custom(dest: *mut u8, len: usize) -> Res
     let buf = unsafe { core::slice::from_raw_parts_mut(dest, len) };
     fill_random(buf).map_err(|_| getrandom::Error::UNEXPECTED)
 }
+
+/// The console's own non-blocking socket option (ProsperoLight's `console_curl.c`).
+#[cfg(target_vendor = "sie")]
+const SO_NBIO: c_int = 0x1200;
+
+#[cfg(target_vendor = "sie")]
+extern "C" {
+    fn __real_fcntl(fd: c_int, cmd: c_int, ...) -> c_int;
+    fn __real_ioctl(fd: c_int, request: core::ffi::c_ulong, ...) -> c_int;
+}
+
+#[cfg(target_vendor = "sie")]
+fn set_nbio(fd: c_int, on: bool) -> c_int {
+    let on = c_int::from(on);
+    // SAFETY: `on` is a readable int of the size passed.
+    unsafe {
+        libc::setsockopt(
+            fd,
+            libc::SOL_SOCKET,
+            SO_NBIO,
+            (&raw const on).cast(),
+            size_of::<c_int>() as libc::socklen_t,
+        )
+    }
+}
+
+/// In a title the console's libc refuses fcntl on sockets and kqueues with EINVAL, so mio's
+/// `FD_CLOEXEC` on its kqueue failed every tokio runtime and `O_NONBLOCK` every socket. A
+/// refused descriptor-flag call succeeds (a title never execs), and the status flags map onto
+/// `SO_NBIO`. Bound with `--wrap=fcntl`; the third argument is an int or a pointer.
+///
+/// # Safety
+/// As `fcntl`.
+#[cfg(target_vendor = "sie")]
+#[no_mangle]
+pub unsafe extern "C" fn __wrap_fcntl(fd: c_int, cmd: c_int, arg: usize) -> c_int {
+    // SAFETY: the caller's arguments, passed through.
+    let result = unsafe { __real_fcntl(fd, cmd, arg) };
+    if result >= 0 || std::io::Error::last_os_error().raw_os_error() != Some(libc::EINVAL) {
+        return result;
+    }
+    match cmd {
+        libc::F_GETFD | libc::F_SETFD => 0,
+        libc::F_SETFL => set_nbio(fd, arg as c_int & libc::O_NONBLOCK != 0),
+        libc::F_GETFL => {
+            let mut on: c_int = 0;
+            let mut len = size_of::<c_int>() as libc::socklen_t;
+            // SAFETY: `on` and `len` are writable and `len` holds the size of `on`.
+            let rc = unsafe { libc::getsockopt(fd, libc::SOL_SOCKET, SO_NBIO, (&raw mut on).cast(), &mut len) };
+            if rc < 0 {
+                return -1;
+            }
+            libc::O_RDWR | if on != 0 { libc::O_NONBLOCK } else { 0 }
+        }
+        _ => result,
+    }
+}
+
+/// std's `set_nonblocking` is `ioctl(FIONBIO)`, which the console refuses on sockets (EACCES):
+/// quinn-udp's sockets and mdns-sd's failed with it. A refused FIONBIO goes to `SO_NBIO`.
+/// Bound with `--wrap=ioctl`.
+///
+/// # Safety
+/// As `ioctl`.
+#[cfg(target_vendor = "sie")]
+#[no_mangle]
+pub unsafe extern "C" fn __wrap_ioctl(fd: c_int, request: core::ffi::c_ulong, arg: *mut c_void) -> c_int {
+    // SAFETY: the caller's arguments, passed through.
+    let result = unsafe { __real_ioctl(fd, request, arg) };
+    if result == 0 || request != libc::FIONBIO || arg.is_null() {
+        return result;
+    }
+    // SAFETY: FIONBIO's argument is the caller's int.
+    set_nbio(fd, unsafe { *arg.cast::<c_int>() } != 0)
+}

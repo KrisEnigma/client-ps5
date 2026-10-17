@@ -782,11 +782,16 @@ fn quic_tls(ctx: &Ctx) -> Result<Outcome> {
     ok(format!("host fingerprint {:02x}{:02x}{:02x}…", fp[0], fp[1], fp[2]))
 }
 
-/// Hosts the console's discovery finds in 4 s. With a host in `probe.json` one is on this
+/// Whether a title may bind the mDNS port, which a full responder needs, then the hosts the
+/// console's unicast-reply discovery finds in 4 s. With a host in `probe.json` one is on this
 /// network, so finding none fails.
 fn mdns(ctx: &Ctx) -> Result<Outcome> {
+    let port = match UdpSocket::bind("0.0.0.0:5353") {
+        Ok(_) => "bind 5353 ok".to_string(),
+        Err(e) => format!("bind 5353 errno {}", e.raw_os_error().unwrap_or(0)),
+    };
     let Some(mut d) = pf_ps5_app::services::discovery::Discovery::start() else {
-        bail!("the mDNS daemon did not start");
+        bail!("{port}; no mDNS query went out");
     };
     let deadline = Instant::now() + Duration::from_secs(4);
     let mut seen = Vec::new();
@@ -798,10 +803,10 @@ fn mdns(ctx: &Ctx) -> Result<Outcome> {
     }
     if seen.is_empty() {
         if let Some(host) = ctx.config.host.as_deref() {
-            bail!("no host answered, though {host} is on this network");
+            bail!("{port}; no host answered, though {host} is on this network");
         }
     }
-    ok(format!("{} host(s): {}", seen.len(), seen.join(", ")))
+    ok(format!("{port}; {} host(s): {}", seen.len(), seen.join(", ")))
 }
 
 /// Pairs on the first run (with the PIN), reconnects with the saved pin afterwards, receives

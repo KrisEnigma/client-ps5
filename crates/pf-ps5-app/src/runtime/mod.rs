@@ -92,12 +92,13 @@ pub fn run(platform: Platform) -> ! {
     let flush = crate::logger::init_subscriber(&crate::services::paths::logs_dir(), log).ok();
     install_panic_hook();
     tracing::info!(
-        "punktfunk-ps5 {} on {} ({} firmware {}), gpu {}",
+        "punktfunk-ps5 {} on {} ({} firmware {}), gpu {}, ui {}",
         crate::core::build_id(),
         device.platform,
         device.model,
         device.firmware,
         device.gpu,
+        device.ui,
     );
     crate::core::caps::install(video.caps());
     // ureq's agents resolve their provider from the process default and panic without one.

@@ -25,11 +25,32 @@ pub enum UiLayer {
 impl UiLayer {
     pub fn new(dev: &GpuDevice, output: vk::Extent2D) -> Result<Self> {
         #[cfg(feature = "skia-vulkan")]
-        match GpuUi::new(dev, output) {
+        let fallback = match GpuUi::new(dev, output) {
             Ok(gpu) => return Ok(Self::Gpu(gpu)),
-            Err(e) => tracing::warn!("ui: Skia on Vulkan unavailable, rastering on the CPU: {e:#}"),
+            Err(e) => {
+                tracing::warn!("ui: Skia on Vulkan unavailable, rastering on the CPU: {e:#}");
+                Some(format!("{e:#}"))
+            }
+        };
+        #[cfg(not(feature = "skia-vulkan"))]
+        let fallback = None;
+        let mut raster = RasterUi::new(dev, output)?;
+        raster.fallback = fallback;
+        Ok(Self::Raster(raster))
+    }
+
+    /// How the layer draws, for the startup log: its backend and size, and why it fell back.
+    /// The console builds this before logging starts, so its own lines never reach the log.
+    pub fn describe(&self) -> String {
+        let vk::Extent2D { width, height } = self.extent();
+        match self {
+            Self::Raster(r) => match &r.fallback {
+                Some(why) => format!("CPU raster {width}x{height} (Skia on Vulkan: {why})"),
+                None => format!("CPU raster {width}x{height}"),
+            },
+            #[cfg(feature = "skia-vulkan")]
+            Self::Gpu(_) => format!("Skia on Vulkan {width}x{height}"),
         }
-        Ok(Self::Raster(RasterUi::new(dev, output)?))
     }
 
     pub fn extent(&self) -> vk::Extent2D {
@@ -96,6 +117,8 @@ pub struct RasterUi {
     staging: Vec<(vk::Buffer, vk::DeviceMemory, *mut u8)>,
     /// The image has been written once, so its contents are `SHADER_READ_ONLY`.
     written: bool,
+    /// Why Skia on Vulkan was not used, when it was tried.
+    fallback: Option<String>,
 }
 
 // SAFETY: the mapped pointers address memory this struct owns for its whole life and only this
@@ -140,6 +163,7 @@ impl RasterUi {
             view,
             staging,
             written: false,
+            fallback: None,
         })
     }
 

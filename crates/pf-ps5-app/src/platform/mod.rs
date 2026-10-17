@@ -39,6 +39,8 @@ pub struct DeviceInfo {
     pub firmware: String,
     /// The graphics driver and its pin (`RADV <mesa> <patch set>`).
     pub gpu: String,
+    /// How the UI layer draws: backend, size, and why it fell back to the CPU.
+    pub ui: String,
 }
 
 /// Refresh rate of the scan-out, in millihertz (59 940, 119 880).

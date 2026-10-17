@@ -106,6 +106,7 @@ pub fn platform() -> Result<Platform> {
         model: "PlayStation 5".into(),
         firmware: String::new(),
         gpu: format!("{} (mesa {MESA_PIN})", dev.name),
+        ui: presenter.ui(),
     };
     Ok(Platform {
         display: Box::new(presenter),

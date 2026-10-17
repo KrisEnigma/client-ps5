@@ -175,6 +175,11 @@ impl Presenter {
         &self.dev
     }
 
+    /// How the UI layer draws ([`UiLayer::describe`]).
+    pub fn ui(&self) -> String {
+        self.ui.describe()
+    }
+
     /// The viewport a `w`×`h` picture takes in `extent` under `fit`.
     fn fitted(fit: Fit, w: u32, h: u32, extent: vk::Extent2D) -> vk::Viewport {
         let (ew, eh) = (extent.width as f32, extent.height as f32);

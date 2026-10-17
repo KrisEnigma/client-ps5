@@ -22,8 +22,9 @@ use punktfunk_core::quic;
 
 /// Frame slots the decoder writes into; a slot is free again once its copy has finished.
 const FRAME_SLOTS: usize = 4;
-/// Device-local plane sets the presenter samples; one is reused once nothing holds it.
-const PLANE_SETS: usize = 3;
+/// Device-local plane sets the presenter samples; one is reused once nothing holds it. The
+/// presenter holds one per frame in flight plus one waiting in the slot, and the lane writes one.
+const PLANE_SETS: usize = pf_ps5_vk::ui::FRAMES + 2;
 
 /// One direct-memory mapping, released on drop.
 struct Direct {
@@ -407,8 +408,7 @@ impl Decoder {
             .iter()
             .position(|f| f.mem.addr == out.buffer)
             .ok_or_else(|| anyhow!("decoder wrote outside the frame pool"))?;
-        let planes = self.copy(index, &out)?;
-        Ok(Some((planes, out.height)))
+        Ok(self.copy(index, &out)?.map(|planes| (planes, out.height)))
     }
 
     /// A plane set nothing else holds, or a new one while there are fewer than [`PLANE_SETS`].
@@ -459,8 +459,10 @@ impl Decoder {
         Ok(Some(set))
     }
 
-    /// Copies frame slot `index` into a free plane set and waits for the copy.
-    fn copy(&mut self, index: usize, out: &Videodec2Output) -> Result<Arc<PlaneSet>> {
+    /// Copies frame slot `index` into a free plane set and waits for the copy. `None` skips the
+    /// picture when the presenter still holds every set: the decoder's state is intact, so this
+    /// is a dropped frame, never a reason to freeze or ask for a keyframe.
+    fn copy(&mut self, index: usize, out: &Videodec2Output) -> Result<Option<Arc<PlaneSet>>> {
         let bytes_per_sample = if self.ten_bit { 2 } else { 1 };
         let pitch_bytes = if out.pitch_bytes != 0 {
             out.pitch_bytes as usize
@@ -470,9 +472,10 @@ impl Decoder {
         let coded_h = out.height;
         let y_bytes = pitch_bytes * coded_h as usize;
         let uv_bytes = pitch_bytes * (coded_h as usize).div_ceil(2);
-        let planes = self
-            .free_planes(out.width, coded_h)?
-            .ok_or_else(|| anyhow!("every plane set is still on screen"))?;
+        let Some(planes) = self.free_planes(out.width, coded_h)? else {
+            tracing::warn!("videodec2: every plane set is still on screen — skipping this picture");
+            return Ok(None);
+        };
         let buffer = match &self.frames[index].upload {
             Upload::Imported { buffer, .. } => *buffer,
             Upload::Staged { buffer, ptr, .. } => {
@@ -569,7 +572,7 @@ impl Decoder {
                 .context("plane copy")?;
             dev.device.reset_fences(&[self.fence])?;
         }
-        Ok(planes)
+        Ok(Some(planes))
     }
 }
 

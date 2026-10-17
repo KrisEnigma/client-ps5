@@ -185,6 +185,52 @@ const SO_NBIO: c_int = 0x1200;
 extern "C" {
     fn __real_fcntl(fd: c_int, cmd: c_int, ...) -> c_int;
     fn __real_ioctl(fd: c_int, request: core::ffi::c_ulong, ...) -> c_int;
+    fn __real_close(fd: c_int) -> c_int;
+}
+
+/// Descriptors handed out again because the console refused to duplicate them, with how many
+/// extra holders each has.
+#[cfg(target_vendor = "sie")]
+static SHARED: std::sync::Mutex<Vec<(c_int, u32)>> = std::sync::Mutex::new(Vec::new());
+
+/// A duplicate of `fd`: `dup`, or where the console refuses that too (EPERM on sockets and
+/// kqueues), `fd` itself with one more holder, so that only its last `close` closes it.
+#[cfg(target_vendor = "sie")]
+fn duplicate(fd: c_int) -> c_int {
+    // SAFETY: `fd` is the caller's open descriptor.
+    let copy = unsafe { libc::dup(fd) };
+    if copy >= 0 {
+        return copy;
+    }
+    let mut shared = SHARED.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    match shared.iter_mut().find(|(f, _)| *f == fd) {
+        Some((_, extra)) => *extra += 1,
+        None => shared.push((fd, 1)),
+    }
+    fd
+}
+
+/// `close` for the descriptors `duplicate` shared: a holder's close only drops its count.
+/// Bound with `--wrap=close`.
+///
+/// # Safety
+/// As `close`.
+#[cfg(target_vendor = "sie")]
+#[no_mangle]
+pub unsafe extern "C" fn __wrap_close(fd: c_int) -> c_int {
+    {
+        let mut shared = SHARED.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(i) = shared.iter().position(|(f, _)| *f == fd) {
+            if shared[i].1 > 1 {
+                shared[i].1 -= 1;
+            } else {
+                shared.swap_remove(i);
+            }
+            return 0;
+        }
+    }
+    // SAFETY: the caller's descriptor, passed through.
+    unsafe { __real_close(fd) }
 }
 
 #[cfg(target_vendor = "sie")]
@@ -202,10 +248,11 @@ fn set_nbio(fd: c_int, on: bool) -> c_int {
     }
 }
 
-/// In a title the console's libc refuses fcntl on sockets and kqueues with EINVAL, so mio's
-/// `FD_CLOEXEC` on its kqueue failed every tokio runtime and `O_NONBLOCK` every socket. A
-/// refused descriptor-flag call succeeds (a title never execs), and the status flags map onto
-/// `SO_NBIO`. Bound with `--wrap=fcntl`; the third argument is an int or a pointer.
+/// In a title the console's libc refuses fcntl on sockets and kqueues (EINVAL or EACCES):
+/// socket2's `O_NONBLOCK` failed quinn-udp, and tokio's I/O driver failed every runtime cloning
+/// mio's kqueue (`F_DUPFD_CLOEXEC`). A refused descriptor-flag call succeeds (a title never
+/// execs), a refused duplicate goes to `duplicate`, and the status flags map onto `SO_NBIO`.
+/// Bound with `--wrap=fcntl`; the third argument is an int or a pointer.
 ///
 /// # Safety
 /// As `fcntl`.
@@ -214,11 +261,16 @@ fn set_nbio(fd: c_int, on: bool) -> c_int {
 pub unsafe extern "C" fn __wrap_fcntl(fd: c_int, cmd: c_int, arg: usize) -> c_int {
     // SAFETY: the caller's arguments, passed through.
     let result = unsafe { __real_fcntl(fd, cmd, arg) };
-    if result >= 0 || std::io::Error::last_os_error().raw_os_error() != Some(libc::EINVAL) {
+    let refused = matches!(
+        std::io::Error::last_os_error().raw_os_error(),
+        Some(libc::EINVAL | libc::EACCES)
+    );
+    if result >= 0 || !refused {
         return result;
     }
     match cmd {
         libc::F_GETFD | libc::F_SETFD => 0,
+        libc::F_DUPFD | libc::F_DUPFD_CLOEXEC => duplicate(fd),
         libc::F_SETFL => set_nbio(fd, arg as c_int & libc::O_NONBLOCK != 0),
         libc::F_GETFL => {
             let mut on: c_int = 0;

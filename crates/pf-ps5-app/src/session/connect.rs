@@ -376,12 +376,19 @@ mod tests {
     use super::*;
 
     const fn mode(width: u32, height: u32, refresh_hz: u32) -> Mode {
-        Mode { width, height, refresh_hz }
+        Mode {
+            width,
+            height,
+            refresh_hz,
+        }
     }
 
     #[test]
     fn h264_at_4k120_asks_for_4k60() {
-        assert_eq!(decodable_mode(mode(3840, 2160, 120), CodecPref::H264), mode(3840, 2160, 60));
+        assert_eq!(
+            decodable_mode(mode(3840, 2160, 120), CodecPref::H264),
+            mode(3840, 2160, 60)
+        );
     }
 
     #[test]

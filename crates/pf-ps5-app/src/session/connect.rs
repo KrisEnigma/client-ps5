@@ -194,6 +194,8 @@ fn dial(params: &ConnectParams, negotiated: &Negotiated) -> Result<NativeClient>
             0
         },
         // Both lanes take complete AUs, so `frame_parts` stays off.
+        // The video thread reopens its decoder on a frame in a new format.
+        rebuilds_decoder: true,
         launch: params.launch.clone(),
         pin: params.pin,
         identity: Some(params.identity.clone()),

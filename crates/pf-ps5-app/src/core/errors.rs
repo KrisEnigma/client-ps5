@@ -59,7 +59,7 @@ fn reject_message(reason: RejectReason) -> String {
 /// Why connect/probe failed (distinguishes rejection from transport trouble).
 fn connect_message(err: &PunktfunkError) -> String {
     match err {
-        PunktfunkError::Rejected(reason) => reject_message(*reason),
+        PunktfunkError::Rejected(reason, _) => reject_message(*reason),
         PunktfunkError::Timeout => "The host didn't answer. Is it running and reachable?".into(),
         PunktfunkError::Io(e) => {
             format!("Couldn't reach the host ({e}) — the console and the host must be on the same network.")

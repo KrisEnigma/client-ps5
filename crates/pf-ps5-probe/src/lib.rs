@@ -89,6 +89,7 @@ const CHECKS: &[(&str, Check)] = &[
     ("async-steps", async_steps),
     ("udp-quinn", udp_quinn),
     ("udp-rate", udp_rate),
+    ("sockbuf", sockbuf),
     ("tokio", tokio_runtime),
     ("tcp-mgmt", tcp_mgmt),
     ("quic-tls", quic_tls),
@@ -321,6 +322,13 @@ fn crypto(_: &Ctx) -> Result<Outcome> {
 extern "C" {
     fn __real_fcntl(fd: libc::c_int, cmd: libc::c_int, ...) -> libc::c_int;
     fn __real_ioctl(fd: libc::c_int, request: libc::c_ulong, ...) -> libc::c_int;
+    fn __real_setsockopt(
+        fd: libc::c_int,
+        level: libc::c_int,
+        name: libc::c_int,
+        value: *const libc::c_void,
+        len: libc::socklen_t,
+    ) -> libc::c_int;
 }
 
 #[cfg(target_os = "freebsd")]
@@ -642,6 +650,78 @@ fn udp_rate(_: &Ctx) -> Result<Outcome> {
         sent.load(Ordering::Relaxed),
         got as f64 / calls.max(1) as f64
     ))
+}
+
+/// Socket buffers as core grows them (32 MiB each way): on the console, the cap and what each
+/// size gets past the wraps; then core's ask through them. Fails when the receive buffer stays
+/// at its default.
+fn sockbuf(_: &Ctx) -> Result<Outcome> {
+    use std::os::fd::AsRawFd;
+    let int_len = size_of::<libc::c_int>() as libc::socklen_t;
+    let get = |fd: libc::c_int, opt: libc::c_int| {
+        let (mut v, mut len): (libc::c_int, libc::socklen_t) = (0, int_len);
+        // SAFETY: `v` and `len` are writable and `len` holds the size of `v`.
+        unsafe { libc::getsockopt(fd, libc::SOL_SOCKET, opt, (&raw mut v).cast(), &mut len) };
+        v
+    };
+    let mut parts = Vec::new();
+    #[cfg(target_vendor = "sie")]
+    {
+        let (mut cap, mut len) = (0u64, size_of::<u64>());
+        // SAFETY: the name is NUL-terminated; `cap` is writable for `len` bytes.
+        let rc = unsafe {
+            libc::sysctlbyname(
+                c"kern.ipc.maxsockbuf".as_ptr(),
+                (&raw mut cap).cast(),
+                &mut len,
+                std::ptr::null_mut::<libc::c_void>() as _,
+                0,
+            )
+        };
+        parts.push(if rc == 0 {
+            format!("maxsockbuf {cap}")
+        } else {
+            format!("maxsockbuf errno {}", errno())
+        });
+        for size in [32 << 20, 4 << 20, 2 << 20, 1 << 20, 256 << 10] {
+            let s = UdpSocket::bind("127.0.0.1:0")?;
+            let size: libc::c_int = size;
+            // SAFETY: `s` is open; `size` is a readable int of `int_len` bytes.
+            let rc = unsafe {
+                __real_setsockopt(
+                    s.as_raw_fd(),
+                    libc::SOL_SOCKET,
+                    libc::SO_RCVBUF,
+                    (&raw const size).cast(),
+                    int_len,
+                )
+            };
+            let answer = if rc == 0 {
+                "ok".to_string()
+            } else {
+                format!("errno {}", errno())
+            };
+            parts.push(format!("raw {}K {answer}", size >> 10));
+        }
+    }
+    let udp = UdpSocket::bind("127.0.0.1:0")?;
+    let fd = udp.as_raw_fd();
+    let before = get(fd, libc::SO_RCVBUF);
+    let ask: libc::c_int = 32 << 20;
+    for opt in [libc::SO_RCVBUF, libc::SO_SNDBUF] {
+        // SAFETY: `fd` is open; `ask` is a readable int of `int_len` bytes.
+        unsafe { libc::setsockopt(fd, libc::SOL_SOCKET, opt, (&raw const ask).cast(), int_len) };
+    }
+    let rcv = get(fd, libc::SO_RCVBUF);
+    parts.push(format!(
+        "32M ask: rcv {before} -> {rcv}, snd {}",
+        get(fd, libc::SO_SNDBUF)
+    ));
+    let detail = parts.join(", ");
+    if rcv <= before {
+        bail!("{detail}");
+    }
+    ok(detail)
 }
 
 fn tokio_runtime(_: &Ctx) -> Result<Outcome> {

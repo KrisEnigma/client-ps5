@@ -16,7 +16,8 @@ punktfunk-core.workspace = true
 pf-ps5-app = { path = "../pf-ps5-app" }
 pf-ps5-sys = { path = "../pf-ps5-sys" }
 quinn-udp = "0.5"
-tokio = { version = "1", features = ["rt-multi-thread", "time"] }
+tokio = { version = "1", features = ["rt-multi-thread", "time", "net"] }
+libc = "0.2"
 getrandom02 = { package = "getrandom", version = "0.2" }
 
 [lints]

@@ -52,9 +52,9 @@ shims=(pthread_set_name_np pthread_setname_np getentropy getrandom recvmmsg if_n
 own=()
 for s in "${shims[@]}"; do own+=("--defsym=$s=pf_ps5_$s"); done
 own+=(--defsym=_Z11SkLogVAList13SkLogPriorityPKcP13__va_list_tag=pf_ps5_sk_log_va_list)
-# Socket flags through the console's SO_NBIO where fcntl and FIONBIO are refused, and shared
-# descriptors where it refuses a duplicate (shim.rs).
-own+=(--wrap=fcntl --wrap=ioctl --wrap=close)
+# Socket flags through the console's SO_NBIO where fcntl and FIONBIO are refused, shared
+# descriptors where it refuses a duplicate, socket buffers its cap refuses (shim.rs).
+own+=(--wrap=fcntl --wrap=ioctl --wrap=close --wrap=setsockopt)
 { echo '{'; echo '    local:'; printf '        %s;\n' "${shims[@]}"; echo '};'; } > "$work/own-local.map"
 
 # Rust's FreeBSD 11 bindings name these by symbol version; the console's stubs carry none.

@@ -186,6 +186,46 @@ extern "C" {
     fn __real_fcntl(fd: c_int, cmd: c_int, ...) -> c_int;
     fn __real_ioctl(fd: c_int, request: core::ffi::c_ulong, ...) -> c_int;
     fn __real_close(fd: c_int) -> c_int;
+    fn __real_setsockopt(fd: c_int, level: c_int, name: c_int, value: *const c_void, len: libc::socklen_t) -> c_int;
+}
+
+/// Below this a refused socket buffer keeps its default rather than shrink further.
+#[cfg(target_vendor = "sie")]
+const SOCKBUF_FLOOR: c_int = 64 << 10;
+
+/// `setsockopt` for `SO_RCVBUF`/`SO_SNDBUF`: FreeBSD refuses a size above its cap where Linux
+/// clamps it, so core's 32 MiB ask left the 9/41 KiB defaults. A refused size steps down by a
+/// quarter until one takes, to [`SOCKBUF_FLOOR`]. Bound with `--wrap=setsockopt`.
+///
+/// # Safety
+/// As `setsockopt`.
+#[cfg(target_vendor = "sie")]
+#[no_mangle]
+pub unsafe extern "C" fn __wrap_setsockopt(
+    fd: c_int,
+    level: c_int,
+    name: c_int,
+    value: *const c_void,
+    len: libc::socklen_t,
+) -> c_int {
+    // SAFETY: the caller's arguments, passed through.
+    let rc = unsafe { __real_setsockopt(fd, level, name, value, len) };
+    let buffer = level == libc::SOL_SOCKET && matches!(name, libc::SO_RCVBUF | libc::SO_SNDBUF);
+    if rc == 0 || !buffer || value.is_null() || len as usize != size_of::<c_int>() {
+        return rc;
+    }
+    // SAFETY: errno is this thread's; `value` holds an int, as `len` says.
+    let (errno, mut size) = unsafe { (*libc::__error(), value.cast::<c_int>().read_unaligned()) };
+    while size > SOCKBUF_FLOOR {
+        size -= size / 4;
+        // SAFETY: `size` is a readable int of `len` bytes.
+        if unsafe { __real_setsockopt(fd, level, name, (&raw const size).cast(), len) } == 0 {
+            return 0;
+        }
+    }
+    // SAFETY: as above.
+    unsafe { *libc::__error() = errno };
+    rc
 }
 
 /// Descriptors handed out again because the console refused to duplicate them, with how many

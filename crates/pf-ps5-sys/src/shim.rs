@@ -106,6 +106,35 @@ pub extern "C" fn pf_ps5_uselocale(_locale: *mut c_void) -> *mut c_void {
     usize::MAX as *mut c_void
 }
 
+/// std formats a failed `getaddrinfo` with this, which only libScePosixForWebKit's stub defines:
+/// a name lookup that failed would have jumped to address 0.
+#[no_mangle]
+pub extern "C" fn pf_ps5_gai_strerror(_code: c_int) -> *const c_char {
+    c"address lookup failed".as_ptr()
+}
+
+/// `mkstemp` resolves only to libScePosixForWebKit, which gives a title nothing; RADV imports it
+/// for a debug dump. It fails with ENOSYS.
+#[cfg(target_os = "freebsd")]
+#[no_mangle]
+pub extern "C" fn pf_ps5_mkstemp(_template: *mut c_char) -> c_int {
+    enosys()
+}
+
+/// `readlink` resolves only to `libkernel_sys`, which gives a title nothing. It fails with ENOSYS.
+#[cfg(target_os = "freebsd")]
+#[no_mangle]
+pub extern "C" fn pf_ps5_readlink(_path: *const c_char, _buf: *mut c_char, _len: usize) -> isize {
+    enosys() as isize
+}
+
+#[cfg(target_os = "freebsd")]
+fn enosys() -> c_int {
+    // SAFETY: errno is this thread's.
+    unsafe { *libc::__error() = libc::ENOSYS };
+    -1
+}
+
 /// Reports no loaded objects: std's symbolizer names no frames, and the panic hook's raw
 /// addresses go through `task symbolize`. C++ exceptions cannot unwind through it.
 #[no_mangle]

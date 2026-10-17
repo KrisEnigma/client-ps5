@@ -275,9 +275,11 @@ impl GamepadType {
 /// Automatic bitrate's ceiling, handed to `punktfunk_core::abr` through `main`
 /// (`PUNKTFUNK_ABR_MAX_MBPS`). It binds every codec, so it must sit above Automatic `PyroWave`'s
 /// quality floor (0.5 bit/pixel: 497 664 kbit/s at 4K120); below it, core clamps every `PyroWave`
-/// session to that floor. 750 Mbit/s of video is about 885 Mbit/s on the wire with the host's 20 %
-/// FEC, inside a gigabit link. HEVC and H.264 stop well below it, at the decoder's headroom.
-pub const BITRATE_MAX_KBPS: u32 = 750_000;
+/// session to that floor. At 4K120 on a gigabit link the host's queue starts to delay frames once
+/// about 780 Mbit/s are on the wire (video plus its 20 % FEC); core then cuts to the floor and
+/// climbs again. 650 Mbit/s of video, ~750 on the wire, holds under that. HEVC and H.264 stop
+/// well below it, at the decoder's headroom.
+pub const BITRATE_MAX_KBPS: u32 = 650_000;
 
 /// 70% of measured goodput (headroom for FEC, loss).
 /// Integer arithmetic order matters (`/ 10 * 7`, not `* 0.7`) — all clients must agree exactly.

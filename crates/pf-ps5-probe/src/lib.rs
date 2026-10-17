@@ -673,7 +673,7 @@ fn host(ctx: &Ctx) -> Option<(&str, u16)> {
     ctx.config
         .host
         .as_deref()
-        .map(|h| (h, ctx.config.port.unwrap_or(47_989)))
+        .map(|h| (h, ctx.config.port.unwrap_or(pf_client_core::deeplink::DEFAULT_PORT)))
 }
 
 fn tcp_mgmt(ctx: &Ctx) -> Result<Outcome> {

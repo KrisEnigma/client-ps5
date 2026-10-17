@@ -48,7 +48,7 @@ source "$vk/tools/radv-link.sh"
 radv_link_recipe "$vk" "$sdk" "$archive"
 
 # The client's own bindings (pf-ps5-sys `shim`), kept local like the recipe's.
-shims=(pthread_set_name_np getentropy getrandom recvmmsg if_nametoindex minherit uselocale dl_iterate_phdr)
+shims=(pthread_set_name_np pthread_setname_np getentropy getrandom recvmmsg if_nametoindex minherit uselocale dl_iterate_phdr)
 own=()
 for s in "${shims[@]}"; do own+=("--defsym=$s=pf_ps5_$s"); done
 own+=(--defsym=_Z11SkLogVAList13SkLogPriorityPKcP13__va_list_tag=pf_ps5_sk_log_va_list)

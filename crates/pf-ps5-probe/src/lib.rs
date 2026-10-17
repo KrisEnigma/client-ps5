@@ -253,7 +253,8 @@ fn files(ctx: &Ctx) -> Result<Outcome> {
 
 fn entropy(_: &Ctx) -> Result<Outcome> {
     let mut a = [0u8; 32];
-    let sysctl = pf_ps5_sys::shim::fill_random(&mut a).map_or_else(
+    let filled = pf_ps5_sys::shim::fill_random(&mut a);
+    let sysctl = filled.map_or_else(
         |rc| format!("kern.rng_pseudo failed ({rc})"),
         |()| "kern.rng_pseudo ok".into(),
     );
@@ -262,7 +263,9 @@ fn entropy(_: &Ctx) -> Result<Outcome> {
         |e| format!("getrandom 0.2 failed ({e})"),
         |()| "getrandom 0.2 ok".into(),
     );
-    if a == [0; 32] && b == [0; 32] {
+    // The client's source is the sysctl (aws-lc's getentropy, std's getrandom); a buffer it
+    // left partly written is still a failure.
+    if filled.is_err() || a == [0; 32] {
         bail!("{sysctl}, {g02}");
     }
     ok(format!("{sysctl}, {g02}"))

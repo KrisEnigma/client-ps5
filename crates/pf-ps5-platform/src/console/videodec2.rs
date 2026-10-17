@@ -236,7 +236,10 @@ impl Decoder {
     fn new(dev: Arc<GpuDevice>, spec: &StreamSpec) -> Result<Self> {
         let ten_bit = spec.bit_depth >= 10;
         let (codec_type, profile, level) = config_for(spec.codec, ten_bit, spec.width, spec.height, spec.refresh_hz)?;
-        let coded_height = spec.height.div_ceil(16) * 16;
+        // HEVC codes 32-row blocks: at 2160 rows a 2160-high decoder refused every picture
+        // (0x811d0302), and console titles size it 2176 (H.264's 16-row macroblocks fit 2160).
+        let align = if codec_type == CODEC_HEVC { 32 } else { 16 };
+        let coded_height = spec.height.div_ceil(align) * align;
         // SAFETY: every out-parameter is a local; memory handed to the decoder is owned by the
         // returned `Decoder`, which deletes the decoder before dropping it.
         unsafe {

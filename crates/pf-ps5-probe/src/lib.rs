@@ -685,7 +685,7 @@ fn sockbuf(_: &Ctx) -> Result<Outcome> {
         } else {
             format!("maxsockbuf errno {}", errno())
         });
-        for size in [32 << 20, 4 << 20, 2 << 20, 1 << 20, 256 << 10] {
+        for size in [32 << 20, 12 << 20, 8 << 20, 4 << 20, 2 << 20, 1 << 20, 256 << 10] {
             let s = UdpSocket::bind("127.0.0.1:0")?;
             let size: libc::c_int = size;
             // SAFETY: `s` is open; `size` is a readable int of `int_len` bytes.
@@ -699,7 +699,7 @@ fn sockbuf(_: &Ctx) -> Result<Outcome> {
                 )
             };
             let answer = if rc == 0 {
-                "ok".to_string()
+                format!("ok {}", get(s.as_raw_fd(), libc::SO_RCVBUF))
             } else {
                 format!("errno {}", errno())
             };

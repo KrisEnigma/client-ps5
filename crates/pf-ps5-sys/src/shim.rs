@@ -177,7 +177,7 @@ unsafe extern "Rust" fn __getrandom_v03_custom(dest: *mut u8, len: usize) -> Res
     fill_random(buf).map_err(|_| getrandom::Error::UNEXPECTED)
 }
 
-/// The console's own non-blocking socket option (ProsperoLight's `console_curl.c`).
+/// The console's own non-blocking socket option (`console_curl.c` in the Moonlight port).
 #[cfg(target_vendor = "sie")]
 const SO_NBIO: c_int = 0x1200;
 

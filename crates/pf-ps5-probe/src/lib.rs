@@ -170,6 +170,8 @@ fn threads(_: &Ctx) -> Result<Outcome> {
     ok("16 named threads spawned and joined")
 }
 
+// The initializer is const; on the console's emulated TLS the macro hides that from clippy.
+#[allow(clippy::missing_const_for_thread_local)]
 fn thread_locals(_: &Ctx) -> Result<Outcome> {
     thread_local!(static CELL: std::cell::Cell<u64> = const { std::cell::Cell::new(0) });
     CELL.with(|c| c.set(7));

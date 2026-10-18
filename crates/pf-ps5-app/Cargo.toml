@@ -19,8 +19,6 @@ punktfunk-core.workspace = true
 pf-client-core.workspace = true
 pf-console-ui.workspace = true
 skia-safe.workspace = true
-# mDNS discovery; polled with `try_recv`, so no `async`.
-mdns-sd = { version = "0.21", default-features = false, features = ["logging"] }
 # Library and art fetch over pinned TLS. No ureq backend feature: the provider is named in code.
 ureq = { version = "3", features = ["rustls-no-provider", "rustls-webpki-roots"], default-features = false }
 rustls = { version = "0.23", default-features = false, features = ["aws_lc_rs", "std"] }

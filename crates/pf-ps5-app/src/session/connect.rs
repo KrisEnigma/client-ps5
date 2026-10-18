@@ -133,6 +133,30 @@ struct Negotiated {
     video_codecs: u8,
     /// A single `quic::CODEC_*` bit, or 0 for auto.
     preferred_codec: u8,
+    /// The capture mode to ask for: the user's, at a rate the chosen decoder keeps up with.
+    mode: Mode,
+}
+
+/// The highest pixel rate Videodec2 decodes as H.264: 4K60. Its decoder takes one picture at a
+/// time, 13.5 ms of 16.7 at 4K60 and 9-17 ms of 8.3 at 4K120, where the queue it leaves behind
+/// is flushed every 2 s and read as congestion down to 2 Mbps (`docs/NOTES.md`).
+const H264_MAX_PIXELS_PER_SECOND: u64 = 3840 * 2160 * 60;
+
+/// `mode` with its refresh lowered to 60 Hz where H.264 would outrun the decoder above it.
+fn decodable_mode(mode: Mode, codec: CodecPref) -> Mode {
+    let rate = u64::from(mode.width) * u64::from(mode.height) * u64::from(mode.refresh_hz);
+    if codec != CodecPref::H264 || rate <= H264_MAX_PIXELS_PER_SECOND || mode.refresh_hz <= 60 {
+        return mode;
+    }
+    tracing::info!(
+        "H.264 at {}x{}@{} outruns this console's decoder — asking for {}x{}@60",
+        mode.width,
+        mode.height,
+        mode.refresh_hz,
+        mode.width,
+        mode.height,
+    );
+    Mode { refresh_hz: 60, ..mode }
 }
 
 impl Negotiated {
@@ -159,10 +183,14 @@ impl Negotiated {
         let ten_bit = params.ten_bit_sdr && caps.ten_bit && caps.hevc && codec_pref != CodecPref::H264;
         Self {
             audio_channels,
-            video_caps: if ten_bit { quic::VIDEO_CAP_10BIT } else { 0 },
+            // Multi-slice: Videodec2 splits a picture's slices across its cores, and the host
+            // slices only toward this bit (4 a picture). ProsperoLight asks for 8 and decodes 4K120
+            // HEVC in 6.9 ms (`src/moonlight_stream.cpp:2694,4282`); one slice serializes it.
+            video_caps: quic::VIDEO_CAP_MULTI_SLICE | if ten_bit { quic::VIDEO_CAP_10BIT } else { 0 },
             // Folded from the one codec list so the host's ladder never picks an undecodable lane.
             video_codecs: codecs.iter().fold(0, |set, &pref| set | codec_bit(pref)),
             preferred_codec: codec_bit(codec_pref),
+            mode: decodable_mode(params.mode, codec_pref),
         }
     }
 }
@@ -199,7 +227,7 @@ fn dial(params: &ConnectParams, negotiated: &Negotiated) -> Result<NativeClient>
         identity: Some(params.identity.clone()),
         profile: params.profile.clone(),
         // Uncancelable: the connect has its own thread and the caller joins it.
-        ..punktfunk_core::client::ConnectParams::new(&params.host, params.port, params.mode, params.timeout)
+        ..punktfunk_core::client::ConnectParams::new(&params.host, params.port, negotiated.mode, params.timeout)
     })
     .context("connect")
 }
@@ -343,5 +371,40 @@ impl Connected {
 
     pub fn client(&self) -> &Arc<NativeClient> {
         &self.client
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const fn mode(width: u32, height: u32, refresh_hz: u32) -> Mode {
+        Mode {
+            width,
+            height,
+            refresh_hz,
+        }
+    }
+
+    #[test]
+    fn h264_at_4k120_asks_for_4k60() {
+        assert_eq!(
+            decodable_mode(mode(3840, 2160, 120), CodecPref::H264),
+            mode(3840, 2160, 60)
+        );
+    }
+
+    #[test]
+    fn h264_within_4k60_keeps_its_mode() {
+        for m in [mode(3840, 2160, 60), mode(2560, 1440, 120), mode(1920, 1080, 120)] {
+            assert_eq!(decodable_mode(m, CodecPref::H264), m);
+        }
+    }
+
+    #[test]
+    fn other_codecs_keep_4k120() {
+        for codec in [CodecPref::Hevc, CodecPref::PyroWave, CodecPref::Auto] {
+            assert_eq!(decodable_mode(mode(3840, 2160, 120), codec), mode(3840, 2160, 120));
+        }
     }
 }

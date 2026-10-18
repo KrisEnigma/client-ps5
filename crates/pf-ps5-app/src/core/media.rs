@@ -93,6 +93,13 @@ pub trait VideoSink: Send {
         None
     }
 
+    /// How long the decoder itself took over the last fed picture, where the sink can tell it
+    /// from the rest of [`feed`](Self::feed) (copies, waits on the presenter). `None` = the
+    /// whole feed is the decode.
+    fn decode_us(&self) -> Option<u32> {
+        None
+    }
+
     /// Decoder failed unrecoverably (no re-anchor works). Ends session if true.
     fn is_dead(&self) -> bool {
         false

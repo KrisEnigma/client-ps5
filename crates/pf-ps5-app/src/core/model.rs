@@ -272,11 +272,14 @@ impl GamepadType {
     }
 }
 
-/// The one bitrate ceiling this client has. It bounds the manual bitrate AND, through `main`,
-/// `punktfunk_core::abr`'s automatic wire-budget climb (`PUNKTFUNK_ABR_MAX_MBPS`) and the startup
-/// link-capacity probe's burst target (`PUNKTFUNK_ABR_PROBE_KBPS`) — an Automatic session that
-/// could climb past what the manual pick allows would just be a second, hidden setting.
-pub const BITRATE_MAX_KBPS: u32 = 200_000;
+/// Automatic bitrate's ceiling, handed to `punktfunk_core::abr` through `main`
+/// (`PUNKTFUNK_ABR_MAX_MBPS`). It binds every codec, so it must sit above Automatic `PyroWave`'s
+/// quality floor (0.5 bit/pixel: 497 664 kbit/s at 4K120); below it, core clamps every `PyroWave`
+/// session to that floor. At 4K120 on a gigabit link the host's queue starts to delay frames once
+/// about 780 Mbit/s are on the wire (video plus its 20 % FEC); core then cuts to the floor and
+/// climbs again. 650 Mbit/s of video, ~750 on the wire, holds under that. HEVC and H.264 stop
+/// well below it, at the decoder's headroom.
+pub const BITRATE_MAX_KBPS: u32 = 650_000;
 
 /// 70% of measured goodput (headroom for FEC, loss).
 /// Integer arithmetic order matters (`/ 10 * 7`, not `* 0.7`) — all clients must agree exactly.

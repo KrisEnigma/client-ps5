@@ -154,6 +154,21 @@ impl VideoStage {
         self.sink.set_color(meta, color)
     }
 
+    /// Drops the decoder. Until [`Self::replace_sink`], every delivery answers [`SinkResult::Dead`].
+    pub fn close_sink(&mut self) {
+        self.sink = Box::new(Closed);
+    }
+
+    /// Feeds `sink` from here on. Its clock counts from its own open and it holds no picture, so
+    /// the mapping and any open AU start over.
+    pub fn replace_sink(&mut self, sink: Box<dyn VideoSink>) {
+        self.caps = sink.caps();
+        self.sink = sink;
+        self.parts = AuParts::default();
+        self.pacing.restart();
+        self.abandon_open_au();
+    }
+
     /// Drop everything derived from a mapping that no longer holds: the host anchor and the open
     /// AU's stamp. The audio plane has nothing to reset — it stamps off the player clock on its own.
     fn reset_timeline(&mut self) {
@@ -347,6 +362,24 @@ impl VideoStage {
     }
 }
 
+/// The stage's sink between [`VideoStage::close_sink`] and [`VideoStage::replace_sink`].
+struct Closed;
+
+impl VideoSink for Closed {
+    fn name(&self) -> &'static str {
+        "closed"
+    }
+    fn caps(&self) -> VideoSinkCaps {
+        VideoSinkCaps::FEED_ONLY
+    }
+    fn feed(&self, _au: &[u8], _pts_ns: u64, _flags: crate::core::media::FeedFlags) -> anyhow::Result<()> {
+        anyhow::bail!("decoder closed")
+    }
+    fn is_dead(&self) -> bool {
+        true
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -533,6 +566,34 @@ mod tests {
             loss,
             feed: crate::core::media::FeedFlags::default(),
         }
+    }
+
+    /// A closed stage answers `Dead`; the sink that replaces it takes the next frame, mapped
+    /// on its own clock rather than the old decoder's.
+    #[test]
+    fn a_replaced_sink_takes_the_next_frame_on_its_own_clock() {
+        let mut h = harness();
+        h.clock.set(5_000_000_000);
+        assert!(matches!(
+            h.stage.submit(&frame(1, None, true, false)),
+            SinkResult::Presented { .. }
+        ));
+        h.stage.close_sink();
+        assert!(matches!(h.stage.submit(&frame(2, None, true, false)), SinkResult::Dead));
+
+        let sink = FakeSink::default();
+        sink.clock.set(1_000);
+        let fed = Arc::new(Mutex::new(Vec::new()));
+        let recorder = Arc::clone(&fed);
+        h.stage.replace_sink(Box::new(RecordingSink { inner: sink, recorder }));
+        assert!(matches!(
+            h.stage.submit(&frame(3, None, true, false)),
+            SinkResult::Presented { .. }
+        ));
+        assert_eq!(h.fed.lock().expect("fed").len(), 1, "the old decoder took nothing more");
+        let stamps = fed.lock().expect("fed").clone();
+        assert_eq!(stamps.len(), 1);
+        assert!(stamps[0] < 1_000_000_000, "stamped on the new clock: {}", stamps[0]);
     }
 
     /// The sampler feeds the heartbeat and steers nothing: a depth that would once have frozen the

@@ -13,6 +13,7 @@ use punktfunk_core::reanchor::DROP_CREDIT_WINDOW;
 use punktfunk_core::PunktfunkError;
 
 use crate::session::audio::AudioStage;
+use crate::session::pipeline::Opener;
 use crate::session::stage::{SinkResult, VideoStage, WireFrame};
 use crate::session::timeline::{CadenceTrace, Deltas};
 use crate::session::StreamStats;
@@ -62,6 +63,8 @@ impl Tick {
 struct VideoPump {
     client: Arc<NativeClient>,
     stage: VideoStage,
+    /// Opens the decoder for each format the host moves the stream to.
+    opener: Opener,
     stats: Arc<StreamStats>,
     /// Core's shared HUD, held rather than fetched per frame.
     hud: Arc<punktfunk_core::hud::Stats>,
@@ -81,7 +84,13 @@ struct VideoPump {
 }
 
 impl VideoPump {
-    fn new(client: Arc<NativeClient>, stage: VideoStage, stats: Arc<StreamStats>, is_hdr: bool) -> Self {
+    fn new(
+        client: Arc<NativeClient>,
+        stage: VideoStage,
+        opener: Opener,
+        stats: Arc<StreamStats>,
+        is_hdr: bool,
+    ) -> Self {
         let last_dropped_seen = client.frames_dropped();
         // `StreamStats` derives `Default`, and 0 is a legitimate slack reading — so the sentinel
         // has to be written before the first heartbeat, or the overlay shows a fabricated
@@ -91,6 +100,7 @@ impl VideoPump {
         Self {
             client,
             stage,
+            opener,
             stats,
             hud,
             is_hdr,
@@ -107,9 +117,16 @@ impl VideoPump {
         }
     }
 
-    fn run(&mut self, stop: &AtomicBool) {
+    fn run(&mut self, first: Option<punktfunk_core::session::Frame>, stop: &AtomicBool) {
+        if let Some(frame) = first {
+            self.on_frame(&frame);
+        }
         while !stop.load(Ordering::Relaxed) {
             match self.client.next_frame(FRAME_WAIT) {
+                Ok(frame) if frame.new_format.is_some() => {
+                    let frame = self.reformat(frame, stop);
+                    self.on_frame(&frame);
+                }
                 Ok(frame) => self.on_frame(&frame),
                 // The SAME heartbeat as the frame path, not a second consumer of the tick: this
                 // arm used to swallow the fire and print only the idle line, so an idle stretch
@@ -131,6 +148,24 @@ impl VideoPump {
             // The connector matches each 0xCF timing to its frame for the overlay. Drained here
             // so the bounded plane never fills.
             while self.client.next_host_timing(Duration::ZERO).is_ok() {}
+        }
+    }
+
+    /// The host moved the stream to a new format at `frame`. The old decoder closes first, so
+    /// the new one opens with its memory free. Returns the frame that opens the stage's decoder;
+    /// a failed open leaves the stage closed, which ends the session on that frame.
+    fn reformat(&mut self, frame: punktfunk_core::session::Frame, stop: &AtomicBool) -> punktfunk_core::session::Frame {
+        tracing::info!("video: the host changed the stream format — reopening the decoder");
+        self.stage.close_sink();
+        match self.opener.open(&self.client, stop) {
+            Ok((sink, first)) => {
+                self.stage.replace_sink(sink);
+                first.unwrap_or(frame)
+            }
+            Err(e) => {
+                tracing::error!("video decoder did not reopen: {e:#}");
+                frame
+            }
         }
     }
 
@@ -391,16 +426,19 @@ impl VideoPump {
     }
 }
 
-/// The video thread's body: pump until `stop`. Owns all `Arc`s, keeping client and stats alive.
+/// The video thread's body: feed `first`, then pump until `stop`. Owns all `Arc`s, keeping
+/// client and stats alive.
 #[allow(clippy::needless_pass_by_value)]
 pub(super) fn video_pump(
     client: Arc<NativeClient>,
     stage: VideoStage,
+    first: Option<punktfunk_core::session::Frame>,
+    opener: Opener,
     stop: Arc<AtomicBool>,
     stats: Arc<StreamStats>,
     is_hdr: bool,
 ) {
-    VideoPump::new(client, stage, stats, is_hdr).run(&stop);
+    VideoPump::new(client, stage, opener, stats, is_hdr).run(first, &stop);
 }
 
 /// How long an audio drain parks on an empty plane before re-checking `stop`.

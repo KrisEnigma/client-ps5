@@ -92,6 +92,26 @@ bundle `PPSA99724/1792279851`, kernel log `klog-20261017-round2.txt`.
   ceiling (200 Mbit/s, under PyroWave's 0.5 bit/pixel floor), not the console's.
 - **mDNS:** binding UDP 5353 fails with EACCES, so mdns-sd's daemon has no socket.
 
+## Proven on the console (round 3, 2026-10-17)
+
+Same console and host, branch `fix/console-round-3`. Evidence: probe logs
+`probe-20261017-204235.log`, `-210124.log`, `-214202.log`, kernel log `klog-20261017-round2.txt`
+(sessions from 23:40 UTC on), ProsperoLight's `performance-last.json` from the same console.
+
+- **Socket buffers:** every accepted `SO_RCVBUF` reads back at most 512 KiB (4 MiB asks read
+  524288); 8 MiB and up fail with ENOBUFS.
+- **mDNS:** a PTR query from an ephemeral port with the unicast-response bit is answered by the
+  host's mdns-sd and finds it, while binding 5353 still fails.
+- **CPU masks:** a title thread starts on `0x1fff`; an eight-byte `cpuset_setaffinity` to
+  `0x1fc0` (off Videodec2's `0x3f`) takes and reads back.
+- **Videodec2 HEVC** with 4 slices and the title's threads off its CPUs: 6.1-8.1 ms a picture at
+  4K120 for 45-60 Mbit/s, ~11.5 ms at ~110 Mbit/s (it then keeps up with ~85 of 120 pictures);
+  ~13.5 ms at 4K60 for ~90 Mbit/s and ~17 ms at ~110. One slice and shared CPUs cost ~2x: 7.6 ms
+  at 4.5 Mbit/s and 12-17 ms at 13-29 Mbit/s.
+- **Plane copy** into device-local planes costs 0.1 ms once it is not waited inside the decode.
+- **PyroWave** at 4K120 tops out at ~790 Mbit/s on the wire (~637 of video): core paces at its
+  800 Mbit/s link floor, because this console's port facts are unknown to core.
+
 ## Console facts the code relies on (sourced, not yet proven)
 
 Sources: ProsperoLight (PL), PS5_Vulkan (VK), PS5_VulkanTemplate (TPL), the payload SDK (SDK),

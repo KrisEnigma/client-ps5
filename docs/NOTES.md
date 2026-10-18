@@ -89,7 +89,10 @@ OpenNOW-PS5 (ONW). Section numbers refer to the extraction kept with the plan's 
   One display "PS5 VideoOut", modes largest first with each 119.88 Hz mode before its 59.94 Hz
   one; 119.88 only when `param.json` `attribute3` declares HFR (0x40; VK/TPL ship 0x80040).
 - **Videodec2:** title process only (payload contexts fail), `sceSysmoduleLoadModule(207)` first,
-  memory type 12 in 16 KiB pages, six-deep DPB for five-reference hosts, H.264 needs `Flush`
+  memory type 12 in 16 KiB pages, a DPB at least the stream's references plus one (a six-deep
+  one failed every picture `811d0302` against Intel VAAPI's nine references at 1440p; sized from
+  the level it decodes, 13 deep, bundle 1792307155) and at most 16 (17 fails the memory query
+  `811d0209`, bundle 1792307478; 16 at 1080p decodes, bundle 1792308114), H.264 needs `Flush`
   after each `Decode` at depth 1. Output is LINEAR NV12, or two-plane 16-bit with the 10 bits
   LOW-aligned for Main10 (not P010). On 13.60 it fails `811d0111` once a process leaves its
   sandbox (PL TROUBLESHOOTING). 4K120 HEVC holds to about 80 Mbit/s (PL PERFORMANCE_GUIDE).

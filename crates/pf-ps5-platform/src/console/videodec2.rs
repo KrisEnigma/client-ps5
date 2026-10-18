@@ -307,6 +307,27 @@ fn config_for(codec: u8, ten_bit: bool, width: u32, height: u32, hz: u32) -> Res
     }
 }
 
+/// The DPB a conforming stream of this size may ask for, plus the picture being decoded. A
+/// smaller one fails every picture `OVERSIZE_DECODE`: VAAPI on Intel reserves nine references
+/// at 1440p. Sized against level 5.1/5.0 so 4K stays at six, what the decoder has always had.
+fn dpb_frames(codec_type: u32, width: u32, coded_height: u32) -> i32 {
+    if codec_type == CODEC_HEVC {
+        // H.265 A.4.2, MaxLumaPs 8 912 896; maxDpbSize already counts the current picture.
+        let (ps, max) = (width * coded_height, 8_912_896);
+        match ps {
+            _ if ps <= max / 4 => 16,
+            _ if ps <= max / 2 => 12,
+            _ if ps <= max * 3 / 4 => 8,
+            _ => 6,
+        }
+    } else {
+        // H.264 A.3.1, MaxDpbMbs 184 320; max_dec_frame_buffering leaves out the current picture.
+        // Videodec2 refuses more than 16 (`0x811d0209` from the memory query at 1080p's 17).
+        let mbs = width.div_ceil(16) * coded_height.div_ceil(16);
+        ((184_320 / mbs).clamp(1, 16) as i32 + 1).min(16)
+    }
+}
+
 impl Decoder {
     fn new(dev: Arc<GpuDevice>, spec: &StreamSpec) -> Result<Self> {
         let ten_bit = spec.bit_depth >= 10;
@@ -335,7 +356,7 @@ impl Decoder {
             cfg.max_level = level;
             cfg.max_width = spec.width as i32;
             cfg.max_height = coded_height as i32;
-            cfg.max_dpb_frames = MAX_DPB_FRAMES;
+            cfg.max_dpb_frames = dpb_frames(codec_type, spec.width, coded_height);
             cfg.pipeline_depth = 1;
             cfg.compute_queue = queue as u64;
             cfg.cpu_affinity = DEFAULT_AFFINITY;
@@ -409,10 +430,11 @@ impl Decoder {
                 .map_err(|_| anyhow!("allocated the wrong number of copy command buffers"))?;
             let imported = frames.iter().all(|f| matches!(f.upload, Upload::Imported { .. }));
             tracing::info!(
-                "videodec2: {}x{} (coded {}) codec {codec_type:#x} profile {profile} level {level}, frame slot {frame_len} bytes, {}",
+                "videodec2: {}x{} (coded {}) codec {codec_type:#x} profile {profile} level {level}, dpb {}, frame slot {frame_len} bytes, {}",
                 spec.width,
                 spec.height,
                 coded_height,
+                cfg.max_dpb_frames,
                 if imported { "imported (step 2)" } else { "staged (step 3)" }
             );
             Ok(Self {

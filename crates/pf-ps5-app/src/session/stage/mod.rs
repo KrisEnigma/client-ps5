@@ -342,9 +342,13 @@ impl VideoStage {
                         self.pacing.note_submitted(base_ns, clock.now_ns());
                     }
                 }
-                // No decoded-output callback; feed latency proxies decoder pressure for ABR.
+                // No decoded-output callback; the decoder's own time where the sink knows it,
+                // else feed latency, proxies decoder pressure for ABR.
                 SinkResult::Presented {
-                    decode_us: self.timing.reports_decode().then_some(au_feed_us),
+                    decode_us: self
+                        .timing
+                        .reports_decode()
+                        .then(|| self.sink.decode_us().unwrap_or(au_feed_us)),
                 }
             }
             // Refused piece wasn't presented; Held keeps caller's AU bookkeeping honest.

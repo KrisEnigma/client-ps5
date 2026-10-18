@@ -76,6 +76,42 @@ logs `probe-20261017-015745.log` and `probe-20261017-031128.log`, menu bundle
   names the path.
 - **Open:** `mdns` found no host in 4 s on any run, while the host answered over TCP.
 
+## Proven on the console (round 2, 2026-10-17)
+
+Same console and host, build 4a8d225. Evidence: probe log `probe-20261017-201422.log`, menu
+bundle `PPSA99724/1792279851`, kernel log `klog-20261017-round2.txt`.
+
+- **UI layer:** Skia on Vulkan draws the menu at ~100 fps, under 1 ms of CPU a frame.
+- **Socket buffers:** a 32 MiB `SO_RCVBUF` fails with ENOBUFS, 4 MiB and below are accepted, and
+  core's 32 MiB ask through the step-down wrap reads back 512 KiB both ways.
+  `kern.ipc.maxsockbuf` is not readable from a title.
+- **Videodec2:** H.264 at 4K120 decodes in 9-17 ms against an 8.3 ms period; the queue it
+  leaves is flushed every 2 s and core reads each flush as congestion, down to 2 Mbit/s. HEVC
+  at 4K60 decodes in 12-15 ms at 15-20 Mbit/s, with no plane-set misses.
+- **PyroWave** at 4K120 arrives at 499 Mbit/s with no loss; that rate was the client's own
+  ceiling (200 Mbit/s, under PyroWave's 0.5 bit/pixel floor), not the console's.
+- **mDNS:** binding UDP 5353 fails with EACCES, so mdns-sd's daemon has no socket.
+
+## Proven on the console (round 3, 2026-10-17)
+
+Same console and host, branch `fix/console-round-3`. Evidence: probe logs
+`probe-20261017-204235.log`, `-210124.log`, `-214202.log`, kernel log `klog-20261017-round2.txt`
+(sessions from 23:40 UTC on), ProsperoLight's `performance-last.json` from the same console.
+
+- **Socket buffers:** every accepted `SO_RCVBUF` reads back at most 512 KiB (4 MiB asks read
+  524288); 8 MiB and up fail with ENOBUFS.
+- **mDNS:** a PTR query from an ephemeral port with the unicast-response bit is answered by the
+  host's mdns-sd and finds it, while binding 5353 still fails.
+- **CPU masks:** a title thread starts on `0x1fff`; an eight-byte `cpuset_setaffinity` to
+  `0x1fc0` (off Videodec2's `0x3f`) takes and reads back.
+- **Videodec2 HEVC** with 4 slices and the title's threads off its CPUs: 6.1-8.1 ms a picture at
+  4K120 for 45-60 Mbit/s, ~11.5 ms at ~110 Mbit/s (it then keeps up with ~85 of 120 pictures);
+  ~13.5 ms at 4K60 for ~90 Mbit/s and ~17 ms at ~110. One slice and shared CPUs cost ~2x: 7.6 ms
+  at 4.5 Mbit/s and 12-17 ms at 13-29 Mbit/s.
+- **Plane copy** into device-local planes costs 0.1 ms once it is not waited inside the decode.
+- **PyroWave** at 4K120 tops out at ~790 Mbit/s on the wire (~637 of video): core paces at its
+  800 Mbit/s link floor, because this console's port facts are unknown to core.
+
 ## Console facts the code relies on (sourced, not yet proven)
 
 Sources: ProsperoLight (PL), PS5_Vulkan (VK), PS5_VulkanTemplate (TPL), the payload SDK (SDK),
@@ -89,7 +125,10 @@ OpenNOW-PS5 (ONW). Section numbers refer to the extraction kept with the plan's 
   One display "PS5 VideoOut", modes largest first with each 119.88 Hz mode before its 59.94 Hz
   one; 119.88 only when `param.json` `attribute3` declares HFR (0x40; VK/TPL ship 0x80040).
 - **Videodec2:** title process only (payload contexts fail), `sceSysmoduleLoadModule(207)` first,
-  memory type 12 in 16 KiB pages, six-deep DPB for five-reference hosts, H.264 needs `Flush`
+  memory type 12 in 16 KiB pages, a DPB at least the stream's references plus one (a six-deep
+  one failed every picture `811d0302` against Intel VAAPI's nine references at 1440p; sized from
+  the level it decodes, 13 deep, bundle 1792307155) and at most 16 (17 fails the memory query
+  `811d0209`, bundle 1792307478; 16 at 1080p decodes, bundle 1792308114), H.264 needs `Flush`
   after each `Decode` at depth 1. Output is LINEAR NV12, or two-plane 16-bit with the 10 bits
   LOW-aligned for Main10 (not P010). On 13.60 it fails `811d0111` once a process leaves its
   sandbox (PL TROUBLESHOOTING). 4K120 HEVC holds to about 80 Mbit/s (PL PERFORMANCE_GUIDE).

@@ -22,6 +22,12 @@ use punktfunk_core::quic;
 
 /// Frame slots the decoder writes into; a slot is free again once its copy has finished.
 const FRAME_SLOTS: usize = 4;
+/// Plane copies in flight on the GPU. Each is waited only when its command buffer comes round
+/// again or its frame slot is about to be decoded into, so the copy overlaps the next decode
+/// instead of being waited inside this one.
+const COPIES: usize = 2;
+/// How often the lane logs where a picture's time went.
+const TIMING_WINDOW: std::time::Duration = std::time::Duration::from_secs(2);
 /// Device-local plane sets the presenter samples; one is reused once nothing holds it. The
 /// presenter holds one per frame in flight plus one waiting in the slot, and the lane writes one.
 const PLANE_SETS: usize = pf_ps5_vk::ui::FRAMES + 2;
@@ -139,8 +145,8 @@ struct PlaneSet {
 
 impl Drop for PlaneSet {
     fn drop(&mut self) {
-        // SAFETY: the last holder drops this after its sampling frame finished; the lane waits
-        // its own copies before publishing.
+        // SAFETY: the last holder drops this after its sampling frame finished; the lane keeps
+        // every set until the decoder drops, which idles the device first.
         unsafe {
             for i in 0..2 {
                 self.dev.device.destroy_image_view(self.views[i], None);
@@ -155,7 +161,6 @@ struct Decoder {
     dev: Arc<GpuDevice>,
     decoder: *mut c_void,
     queue: *mut c_void,
-    is_h264: bool,
     ten_bit: bool,
     /// The visible picture.
     width: u32,
@@ -165,8 +170,11 @@ struct Decoder {
     next_frame: usize,
     planes: Vec<Arc<PlaneSet>>,
     pool: vk::CommandPool,
-    cmd: vk::CommandBuffer,
-    fence: vk::Fence,
+    copies: [PlaneCopy; COPIES],
+    next_copy: usize,
+    /// The Videodec2 calls' time for the last picture, microseconds.
+    decode_us: u32,
+    timing: Timing,
     _compute: Direct,
     _gpu: Option<Direct>,
     _cpu_gpu: Option<Direct>,
@@ -177,6 +185,72 @@ struct Decoder {
 
 // SAFETY: the decoder handle and mappings are used only under the sink's mutex.
 unsafe impl Send for Decoder {}
+
+/// One plane copy's command buffer and fence, and the frame slot it reads while in flight.
+struct PlaneCopy {
+    cmd: vk::CommandBuffer,
+    fence: vk::Fence,
+    reading: Option<usize>,
+}
+
+/// Where the lane's time went over one [`TIMING_WINDOW`]: the Videodec2 calls (what
+/// `ProsperoLight` times, `src/moonlight_stream.cpp:1989-2001,2040-2045`) and the plane copy's
+/// submit, which includes waiting out the presenter's turn and an earlier copy.
+struct Timing {
+    since: Instant,
+    pictures: u32,
+    empty: u32,
+    decode_us: u64,
+    decode_max_us: u32,
+    copy_us: u64,
+    copy_max_us: u32,
+}
+
+impl Timing {
+    fn new() -> Self {
+        Self {
+            since: Instant::now(),
+            pictures: 0,
+            empty: 0,
+            decode_us: 0,
+            decode_max_us: 0,
+            copy_us: 0,
+            copy_max_us: 0,
+        }
+    }
+
+    fn note(&mut self, decode_us: u32, copy_us: Option<u32>) {
+        self.decode_us += u64::from(decode_us);
+        self.decode_max_us = self.decode_max_us.max(decode_us);
+        match copy_us {
+            Some(us) => {
+                self.pictures += 1;
+                self.copy_us += u64::from(us);
+                self.copy_max_us = self.copy_max_us.max(us);
+            }
+            None => self.empty += 1,
+        }
+        if self.since.elapsed() < TIMING_WINDOW {
+            return;
+        }
+        let calls = u64::from(self.pictures + self.empty).max(1);
+        let ms = |us: u64| us as f64 / 1000.0;
+        tracing::debug!(
+            "videodec2[2s]: {} pictures, {} without one; decode mean {:.1}ms max {:.1}ms; copy mean {:.1}ms max {:.1}ms",
+            self.pictures,
+            self.empty,
+            ms(self.decode_us / calls),
+            ms(u64::from(self.decode_max_us)),
+            ms(self.copy_us / u64::from(self.pictures.max(1))),
+            ms(u64::from(self.copy_max_us)),
+        );
+        *self = Self::new();
+    }
+}
+
+fn micros(since: Instant) -> u32 {
+    u32::try_from(since.elapsed().as_micros()).unwrap_or(u32::MAX)
+}
 
 /// Opens Videodec2 sinks that publish to the presenter's slot.
 #[derive(Clone)]
@@ -233,6 +307,27 @@ fn config_for(codec: u8, ten_bit: bool, width: u32, height: u32, hz: u32) -> Res
     }
 }
 
+/// The DPB a conforming stream of this size may ask for, plus the picture being decoded. A
+/// smaller one fails every picture `OVERSIZE_DECODE`: VAAPI on Intel reserves nine references
+/// at 1440p. Sized against level 5.1/5.0 so 4K stays at six, what the decoder has always had.
+fn dpb_frames(codec_type: u32, width: u32, coded_height: u32) -> i32 {
+    if codec_type == CODEC_HEVC {
+        // H.265 A.4.2, MaxLumaPs 8 912 896; maxDpbSize already counts the current picture.
+        let (ps, max) = (width * coded_height, 8_912_896);
+        match ps {
+            _ if ps <= max / 4 => 16,
+            _ if ps <= max / 2 => 12,
+            _ if ps <= max * 3 / 4 => 8,
+            _ => 6,
+        }
+    } else {
+        // H.264 A.3.1, MaxDpbMbs 184 320; max_dec_frame_buffering leaves out the current picture.
+        // Videodec2 refuses more than 16 (`0x811d0209` from the memory query at 1080p's 17).
+        let mbs = width.div_ceil(16) * coded_height.div_ceil(16);
+        ((184_320 / mbs).clamp(1, 16) as i32 + 1).min(16)
+    }
+}
+
 impl Decoder {
     fn new(dev: Arc<GpuDevice>, spec: &StreamSpec) -> Result<Self> {
         let ten_bit = spec.bit_depth >= 10;
@@ -261,7 +356,7 @@ impl Decoder {
             cfg.max_level = level;
             cfg.max_width = spec.width as i32;
             cfg.max_height = coded_height as i32;
-            cfg.max_dpb_frames = MAX_DPB_FRAMES;
+            cfg.max_dpb_frames = dpb_frames(codec_type, spec.width, coded_height);
             cfg.pipeline_depth = 1;
             cfg.compute_queue = queue as u64;
             cfg.cpu_affinity = DEFAULT_AFFINITY;
@@ -316,26 +411,36 @@ impl Decoder {
                     .flags(vk::CommandPoolCreateFlags::RESET_COMMAND_BUFFER),
                 None,
             )?;
-            let cmd = dev.device.allocate_command_buffers(
+            let cmds = dev.device.allocate_command_buffers(
                 &vk::CommandBufferAllocateInfo::default()
                     .command_pool(pool)
                     .level(vk::CommandBufferLevel::PRIMARY)
-                    .command_buffer_count(1),
-            )?[0];
-            let fence = dev.device.create_fence(&vk::FenceCreateInfo::default(), None)?;
+                    .command_buffer_count(COPIES as u32),
+            )?;
+            let mut copies = Vec::with_capacity(COPIES);
+            for cmd in cmds {
+                copies.push(PlaneCopy {
+                    cmd,
+                    fence: dev.device.create_fence(&vk::FenceCreateInfo::default(), None)?,
+                    reading: None,
+                });
+            }
+            let copies: [PlaneCopy; COPIES] = copies
+                .try_into()
+                .map_err(|_| anyhow!("allocated the wrong number of copy command buffers"))?;
             let imported = frames.iter().all(|f| matches!(f.upload, Upload::Imported { .. }));
             tracing::info!(
-                "videodec2: {}x{} (coded {}) codec {codec_type:#x} profile {profile} level {level}, frame slot {frame_len} bytes, {}",
+                "videodec2: {}x{} (coded {}) codec {codec_type:#x} profile {profile} level {level}, dpb {}, frame slot {frame_len} bytes, {}",
                 spec.width,
                 spec.height,
                 coded_height,
+                cfg.max_dpb_frames,
                 if imported { "imported (step 2)" } else { "staged (step 3)" }
             );
             Ok(Self {
                 dev,
                 decoder,
                 queue,
-                is_h264: codec_type == CODEC_AVC,
                 ten_bit,
                 width: spec.width,
                 height: spec.height,
@@ -344,8 +449,10 @@ impl Decoder {
                 next_frame: 0,
                 planes: Vec::new(),
                 pool,
-                cmd,
-                fence,
+                copies,
+                next_copy: 0,
+                decode_us: 0,
+                timing: Timing::new(),
                 _compute: compute,
                 _gpu: gpu,
                 _cpu_gpu: cpu_gpu,
@@ -377,6 +484,12 @@ impl Decoder {
         }
         let slot = self.next_frame;
         self.next_frame = (self.next_frame + 1) % FRAME_SLOTS;
+        for i in 0..COPIES {
+            if self.copies[i].reading == Some(slot) {
+                self.wait_copy(i)?;
+            }
+        }
+        let started = Instant::now();
         // SAFETY: the input slot is writable for its length and not read by the decoder between
         // calls; every struct is a local the calls borrow.
         let out = unsafe {
@@ -390,7 +503,9 @@ impl Decoder {
             frame.buffer_size = self.frames[slot].mem.len as u64;
             let mut out = Videodec2Output::new();
             let mut rc = sceVideodec2Decode(self.decoder, &mut input, &mut frame, &mut out);
-            if rc == 0 && out.valid == 0 && self.is_h264 {
+            // Depth one: a picture Decode did not return comes from Flush into the same frame,
+            // for either codec (`src/moonlight_stream.cpp:2035-2041`).
+            if rc == 0 && out.valid == 0 {
                 out = Videodec2Output::new();
                 rc = sceVideodec2Flush(self.decoder, &mut frame, &mut out);
             }
@@ -400,7 +515,9 @@ impl Decoder {
             }
             out
         };
+        self.decode_us = micros(started);
         if out.valid == 0 || out.picture_count != 1 {
+            self.timing.note(self.decode_us, None);
             return Ok(None);
         }
         let index = self
@@ -408,7 +525,26 @@ impl Decoder {
             .iter()
             .position(|f| f.mem.addr == out.buffer)
             .ok_or_else(|| anyhow!("decoder wrote outside the frame pool"))?;
-        Ok(self.copy(index, &out)?.map(|planes| (planes, out.height)))
+        let copying = Instant::now();
+        let planes = self.copy(index, &out)?;
+        self.timing.note(self.decode_us, Some(micros(copying)));
+        Ok(planes.map(|planes| (planes, out.height)))
+    }
+
+    /// Waits for copy `i` to finish, if it is in flight, and frees its command buffer and slot.
+    fn wait_copy(&mut self, i: usize) -> Result<()> {
+        let c = &mut self.copies[i];
+        if c.reading.take().is_some() {
+            // SAFETY: the fence is this decoder's and was submitted with copy `i`.
+            unsafe {
+                self.dev
+                    .device
+                    .wait_for_fences(&[c.fence], true, 1_000_000_000)
+                    .context("plane copy")?;
+                self.dev.device.reset_fences(&[c.fence])?;
+            }
+        }
+        Ok(())
     }
 
     /// A plane set nothing else holds, or a new one while there are fewer than [`PLANE_SETS`].
@@ -459,9 +595,10 @@ impl Decoder {
         Ok(Some(set))
     }
 
-    /// Copies frame slot `index` into a free plane set and waits for the copy. `None` skips the
-    /// picture when the presenter still holds every set: the decoder's state is intact, so this
-    /// is a dropped frame, never a reason to freeze or ask for a keyframe.
+    /// Copies frame slot `index` into a free plane set without waiting for the copy: the
+    /// presenter samples the set on the same queue, after it, and the barriers below order the
+    /// two. `None` skips the picture when the presenter still holds every set: the decoder's
+    /// state is intact, so this is a dropped frame, never a reason to freeze or ask for a keyframe.
     fn copy(&mut self, index: usize, out: &Videodec2Output) -> Result<Option<Arc<PlaneSet>>> {
         let bytes_per_sample = if self.ten_bit { 2 } else { 1 };
         let pitch_bytes = if out.pitch_bytes != 0 {
@@ -487,25 +624,34 @@ impl Decoder {
                 *buffer
             }
         };
+        let i = self.next_copy;
+        self.next_copy = (i + 1) % COPIES;
+        self.wait_copy(i)?;
+        let (cmd, fence) = (self.copies[i].cmd, self.copies[i].fence);
         let dev = &self.dev;
         let row = |pitch: usize, texel: usize| (pitch / texel) as u32;
-        // SAFETY: the command buffer and fence are this decoder's and idle (each copy is waited
-        // below); the images belong to the plane set, which only this lane writes while it is free.
+        // SAFETY: the command buffer and fence are this decoder's and idle (waited above); the
+        // images belong to the plane set, which only this lane writes while it is free.
         unsafe {
             dev.device
-                .reset_command_buffer(self.cmd, vk::CommandBufferResetFlags::empty())?;
+                .reset_command_buffer(cmd, vk::CommandBufferResetFlags::empty())?;
             dev.device.begin_command_buffer(
-                self.cmd,
+                cmd,
                 &vk::CommandBufferBeginInfo::default().flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT),
             )?;
             for image in planes.images {
+                // After the presenter's last read and any earlier copy into this set, which a
+                // replaced picture can leave in flight.
                 pf_ps5_vk::util::barrier(
                     dev,
-                    self.cmd,
+                    cmd,
                     image,
                     vk::ImageLayout::UNDEFINED,
                     vk::ImageLayout::TRANSFER_DST_OPTIMAL,
-                    (vk::PipelineStageFlags2::FRAGMENT_SHADER, vk::AccessFlags2::NONE),
+                    (
+                        vk::PipelineStageFlags2::FRAGMENT_SHADER | vk::PipelineStageFlags2::COPY,
+                        vk::AccessFlags2::TRANSFER_WRITE,
+                    ),
                     (vk::PipelineStageFlags2::COPY, vk::AccessFlags2::TRANSFER_WRITE),
                 );
             }
@@ -532,14 +678,14 @@ impl Decoder {
                     depth: 1,
                 })];
             dev.device.cmd_copy_buffer_to_image(
-                self.cmd,
+                cmd,
                 buffer,
                 planes.images[0],
                 vk::ImageLayout::TRANSFER_DST_OPTIMAL,
                 &y,
             );
             dev.device.cmd_copy_buffer_to_image(
-                self.cmd,
+                cmd,
                 buffer,
                 planes.images[1],
                 vk::ImageLayout::TRANSFER_DST_OPTIMAL,
@@ -548,7 +694,7 @@ impl Decoder {
             for image in planes.images {
                 pf_ps5_vk::util::barrier(
                     dev,
-                    self.cmd,
+                    cmd,
                     image,
                     vk::ImageLayout::TRANSFER_DST_OPTIMAL,
                     vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
@@ -556,22 +702,16 @@ impl Decoder {
                     (vk::PipelineStageFlags2::FRAGMENT_SHADER, vk::AccessFlags2::SHADER_READ),
                 );
             }
-            dev.device.end_command_buffer(self.cmd)?;
-            let cmds = [self.cmd];
+            dev.device.end_command_buffer(cmd)?;
+            let cmds = [cmd];
             dev.vkd.queue_lock.yield_to_present();
             {
                 let _q = dev.vkd.queue_lock.guard();
-                dev.device.queue_submit(
-                    dev.queue,
-                    &[vk::SubmitInfo::default().command_buffers(&cmds)],
-                    self.fence,
-                )?;
+                dev.device
+                    .queue_submit(dev.queue, &[vk::SubmitInfo::default().command_buffers(&cmds)], fence)?;
             }
-            dev.device
-                .wait_for_fences(&[self.fence], true, 1_000_000_000)
-                .context("plane copy")?;
-            dev.device.reset_fences(&[self.fence])?;
         }
+        self.copies[i].reading = Some(index);
         Ok(Some(planes))
     }
 }
@@ -664,7 +804,9 @@ impl Drop for Decoder {
                     }
                 }
             }
-            dev.device.destroy_fence(self.fence, None);
+            for c in &self.copies {
+                dev.device.destroy_fence(c.fence, None);
+            }
             dev.device.destroy_command_pool(self.pool, None);
         }
     }
@@ -720,6 +862,18 @@ impl VideoSink for Vd2Sink {
 
     fn clock(&self) -> Option<&dyn MediaClock> {
         Some(self)
+    }
+
+    /// The Videodec2 calls alone. The plane copy and the presenter's turn are this lane's
+    /// cost, not the decoder's, and charging them parked the bitrate controller at a fraction
+    /// of what the decoder sustains.
+    fn decode_us(&self) -> Option<u32> {
+        Some(
+            self.decoder
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .decode_us,
+        )
     }
 }
 

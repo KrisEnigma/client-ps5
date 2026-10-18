@@ -63,10 +63,10 @@ ash = { version = "0.38", default-features = false, features = ["debug", "std"] 
 # Same Skia as the shared console; only the PS5 build adds the Vulkan backend (pf-ps5-vk).
 skia-safe = { version = "0.153", features = ["textlayout"] }
 # One REV for all three shared crates: a tag and a rev build two copies whose types don't unify.
-punktfunk-core = { git = "https://git.unom.io/unom/punktfunk", rev = "0c6d8360c0d4a024587a6eff1ea40c420bbf4e3a", features = ["quic"] }
-pf-client-core = { git = "https://git.unom.io/unom/punktfunk", rev = "0c6d8360c0d4a024587a6eff1ea40c420bbf4e3a", default-features = false }
-pf-console-ui = { git = "https://git.unom.io/unom/punktfunk", rev = "0c6d8360c0d4a024587a6eff1ea40c420bbf4e3a", default-features = false }
-pf-client-video = { git = "https://git.unom.io/unom/punktfunk", rev = "0c6d8360c0d4a024587a6eff1ea40c420bbf4e3a", default-features = false, features = ["pyrowave"] }
+punktfunk-core = { git = "https://git.unom.io/unom/punktfunk", rev = "2259121648c20a6681b81f71951a3d54300be153", features = ["quic"] }
+pf-client-core = { git = "https://git.unom.io/unom/punktfunk", rev = "2259121648c20a6681b81f71951a3d54300be153", default-features = false }
+pf-console-ui = { git = "https://git.unom.io/unom/punktfunk", rev = "2259121648c20a6681b81f71951a3d54300be153", default-features = false }
+pf-client-video = { git = "https://git.unom.io/unom/punktfunk", rev = "2259121648c20a6681b81f71951a3d54300be153", default-features = false, features = ["pyrowave"] }
 
 [workspace.lints.rust]
 unsafe_op_in_unsafe_fn = "deny"

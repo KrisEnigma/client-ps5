@@ -82,6 +82,7 @@ const CHECKS: &[(&str, Check)] = &[
     ("mutex-condvar", mutex_condvar),
     ("clocks", clocks),
     ("parallelism", parallelism),
+    ("affinity", affinity),
     ("files", files),
     ("entropy", entropy),
     ("hashmap-seed", hashmap_seed),
@@ -233,6 +234,30 @@ fn clocks(_: &Ctx) -> Result<Outcome> {
 fn parallelism(_: &Ctx) -> Result<Outcome> {
     let n = std::thread::available_parallelism()?;
     ok(format!("{n} threads available"))
+}
+
+/// The title thread's CPU mask, and whether it narrows off Videodec2's workers and reads back,
+/// as the client does at start-up. Restored afterwards. Fails when the narrowing doesn't take.
+#[cfg(target_vendor = "sie")]
+fn affinity(_: &Ctx) -> Result<Outcome> {
+    use pf_ps5_sys::kernel::{set_thread_affinity, thread_affinity};
+    let decoder = pf_ps5_sys::videodec2::DEFAULT_AFFINITY;
+    let mask = thread_affinity().map_err(|e| anyhow!("mask unreadable, errno {e}"))?;
+    let narrowed = mask & !decoder;
+    let set = set_thread_affinity(narrowed);
+    let restored = set_thread_affinity(mask);
+    match (set, restored) {
+        (Ok(()), Ok(())) => ok(format!(
+            "mask {mask:#x}, off the decoder's {decoder:#x}: {narrowed:#x} ok"
+        )),
+        (Err(e), _) => bail!("mask {mask:#x}: setting {narrowed:#x} failed, errno {e}"),
+        (Ok(()), Err(e)) => bail!("mask {mask:#x}: {narrowed:#x} took but restoring failed, errno {e}"),
+    }
+}
+
+#[cfg(not(target_vendor = "sie"))]
+fn affinity(_: &Ctx) -> Result<Outcome> {
+    Ok(Outcome::Skip("CPU masks are the console's".into()))
 }
 
 fn files(ctx: &Ctx) -> Result<Outcome> {
@@ -685,7 +710,7 @@ fn sockbuf(_: &Ctx) -> Result<Outcome> {
         } else {
             format!("maxsockbuf errno {}", errno())
         });
-        for size in [32 << 20, 4 << 20, 2 << 20, 1 << 20, 256 << 10] {
+        for size in [32 << 20, 12 << 20, 8 << 20, 4 << 20, 2 << 20, 1 << 20, 256 << 10] {
             let s = UdpSocket::bind("127.0.0.1:0")?;
             let size: libc::c_int = size;
             // SAFETY: `s` is open; `size` is a readable int of `int_len` bytes.
@@ -699,7 +724,7 @@ fn sockbuf(_: &Ctx) -> Result<Outcome> {
                 )
             };
             let answer = if rc == 0 {
-                "ok".to_string()
+                format!("ok {}", get(s.as_raw_fd(), libc::SO_RCVBUF))
             } else {
                 format!("errno {}", errno())
             };
@@ -782,11 +807,16 @@ fn quic_tls(ctx: &Ctx) -> Result<Outcome> {
     ok(format!("host fingerprint {:02x}{:02x}{:02x}…", fp[0], fp[1], fp[2]))
 }
 
-/// Hosts the console's discovery finds in 4 s. With a host in `probe.json` one is on this
+/// Whether a title may bind the mDNS port, which a full responder needs, then the hosts the
+/// console's unicast-reply discovery finds in 4 s. With a host in `probe.json` one is on this
 /// network, so finding none fails.
 fn mdns(ctx: &Ctx) -> Result<Outcome> {
+    let port = match UdpSocket::bind("0.0.0.0:5353") {
+        Ok(_) => "bind 5353 ok".to_string(),
+        Err(e) => format!("bind 5353 errno {}", e.raw_os_error().unwrap_or(0)),
+    };
     let Some(mut d) = pf_ps5_app::services::discovery::Discovery::start() else {
-        bail!("the mDNS daemon did not start");
+        bail!("{port}; no mDNS query went out");
     };
     let deadline = Instant::now() + Duration::from_secs(4);
     let mut seen = Vec::new();
@@ -798,10 +828,10 @@ fn mdns(ctx: &Ctx) -> Result<Outcome> {
     }
     if seen.is_empty() {
         if let Some(host) = ctx.config.host.as_deref() {
-            bail!("no host answered, though {host} is on this network");
+            bail!("{port}; no host answered, though {host} is on this network");
         }
     }
-    ok(format!("{} host(s): {}", seen.len(), seen.join(", ")))
+    ok(format!("{port}; {} host(s): {}", seen.len(), seen.join(", ")))
 }
 
 /// Pairs on the first run (with the PIN), reconnects with the saved pin afterwards, receives

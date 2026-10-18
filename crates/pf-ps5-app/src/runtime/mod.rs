@@ -64,7 +64,7 @@ enum StreamOutcome {
     Quit(Option<ExitPlan>),
 }
 
-/// Same proven-safe probe target as the connection test, and the client's one bitrate ceiling.
+/// The startup link probe's burst: the connection test's proven-safe target.
 const ABR_PROBE_KBPS: u32 = 320_000;
 
 /// The two automatic-bitrate knobs punktfunk-core reads from the environment. Set before any

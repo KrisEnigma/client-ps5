@@ -34,6 +34,59 @@ pub fn system_version() -> Option<u32> {
     (rc == 0 && version != 0).then_some(version)
 }
 
+/// `cpuset_*affinity`'s level and id kind for "the calling thread".
+#[cfg(target_vendor = "sie")]
+const CPU_LEVEL_WHICH: core::ffi::c_int = 3;
+#[cfg(target_vendor = "sie")]
+const CPU_WHICH_TID: core::ffi::c_int = 1;
+
+#[cfg(target_vendor = "sie")]
+extern "C" {
+    fn cpuset_getaffinity(
+        level: core::ffi::c_int,
+        which: core::ffi::c_int,
+        id: i64,
+        size: usize,
+        mask: *mut u64,
+    ) -> core::ffi::c_int;
+    fn cpuset_setaffinity(
+        level: core::ffi::c_int,
+        which: core::ffi::c_int,
+        id: i64,
+        size: usize,
+        mask: *const u64,
+    ) -> core::ffi::c_int;
+}
+
+/// The calling thread's CPU mask, or the errno. The console takes an eight-byte set and
+/// refuses `sizeof(cpuset_t)` with ERANGE (`ProsperoLight` `platform/ps5/ps5_thread_placement.c:28-32`).
+#[cfg(target_vendor = "sie")]
+pub fn thread_affinity() -> Result<u64, i32> {
+    let mut mask = 0u64;
+    // SAFETY: `mask` is writable for the eight bytes passed.
+    if unsafe { cpuset_getaffinity(CPU_LEVEL_WHICH, CPU_WHICH_TID, -1, size_of::<u64>(), &mut mask) } != 0 {
+        // SAFETY: errno is this thread's.
+        return Err(unsafe { *libc::__error() });
+    }
+    Ok(mask)
+}
+
+/// Sets the calling thread's CPU mask, which threads it starts afterwards inherit. Read back:
+/// a call that succeeds is no proof the mask took. `Err` is the errno, or ERANGE for a read-back
+/// that differs.
+#[cfg(target_vendor = "sie")]
+pub fn set_thread_affinity(mask: u64) -> Result<(), i32> {
+    // SAFETY: `mask` is readable for the eight bytes passed.
+    if unsafe { cpuset_setaffinity(CPU_LEVEL_WHICH, CPU_WHICH_TID, -1, size_of::<u64>(), &mask) } != 0 {
+        // SAFETY: errno is this thread's.
+        return Err(unsafe { *libc::__error() });
+    }
+    match thread_affinity()? {
+        got if got == mask => Ok(()),
+        _ => Err(libc::ERANGE),
+    }
+}
+
 /// Rounds `len` up to [`PAGE`].
 pub const fn page_align(len: usize) -> usize {
     (len + PAGE - 1) & !(PAGE - 1)

@@ -82,6 +82,7 @@ const CHECKS: &[(&str, Check)] = &[
     ("mutex-condvar", mutex_condvar),
     ("clocks", clocks),
     ("parallelism", parallelism),
+    ("affinity", affinity),
     ("files", files),
     ("entropy", entropy),
     ("hashmap-seed", hashmap_seed),
@@ -233,6 +234,30 @@ fn clocks(_: &Ctx) -> Result<Outcome> {
 fn parallelism(_: &Ctx) -> Result<Outcome> {
     let n = std::thread::available_parallelism()?;
     ok(format!("{n} threads available"))
+}
+
+/// The title thread's CPU mask, and whether it narrows off Videodec2's workers and reads back,
+/// as the client does at start-up. Restored afterwards. Fails when the narrowing doesn't take.
+#[cfg(target_vendor = "sie")]
+fn affinity(_: &Ctx) -> Result<Outcome> {
+    use pf_ps5_sys::kernel::{set_thread_affinity, thread_affinity};
+    let decoder = pf_ps5_sys::videodec2::DEFAULT_AFFINITY;
+    let mask = thread_affinity().map_err(|e| anyhow!("mask unreadable, errno {e}"))?;
+    let narrowed = mask & !decoder;
+    let set = set_thread_affinity(narrowed);
+    let restored = set_thread_affinity(mask);
+    match (set, restored) {
+        (Ok(()), Ok(())) => ok(format!(
+            "mask {mask:#x}, off the decoder's {decoder:#x}: {narrowed:#x} ok"
+        )),
+        (Err(e), _) => bail!("mask {mask:#x}: setting {narrowed:#x} failed, errno {e}"),
+        (Ok(()), Err(e)) => bail!("mask {mask:#x}: {narrowed:#x} took but restoring failed, errno {e}"),
+    }
+}
+
+#[cfg(not(target_vendor = "sie"))]
+fn affinity(_: &Ctx) -> Result<Outcome> {
+    Ok(Outcome::Skip("CPU masks are the console's".into()))
 }
 
 fn files(ctx: &Ctx) -> Result<Outcome> {

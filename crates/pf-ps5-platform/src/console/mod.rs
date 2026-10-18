@@ -85,6 +85,29 @@ impl VideoDecoders for Ps5Video {
     }
 }
 
+/// Narrows this thread, and so every thread it starts from here on, to the CPUs Videodec2's
+/// workers are not given. `ProsperoLight` keeps every stream thread off them
+/// (`src/moonlight_stream.cpp:4646-4659`) and decodes 4K120 HEVC at 56 Mbit/s in 6.9 ms a
+/// picture; sharing them, this title took 7.4-8.7 ms at 4.5 Mbit/s. Runs before logging exists,
+/// so it reports to the kernel log.
+fn keep_off_decoder_cpus() {
+    use pf_ps5_sys::kernel::{set_thread_affinity, thread_affinity};
+    use std::io::Write as _;
+    let decoder = pf_ps5_sys::videodec2::DEFAULT_AFFINITY;
+    let line = match thread_affinity() {
+        Ok(mask) if mask & !decoder == 0 => format!("CPUs {mask:#x} are all the decoder's; left as they are"),
+        Ok(mask) => match set_thread_affinity(mask & !decoder) {
+            Ok(()) => format!(
+                "CPUs {:#x}, off the decoder's {decoder:#x} (was {mask:#x})",
+                mask & !decoder
+            ),
+            Err(errno) => format!("CPUs {mask:#x} kept: narrowing them failed (errno {errno})"),
+        },
+        Err(errno) => format!("CPU mask unreadable (errno {errno})"),
+    };
+    let _ = writeln!(klog::Klog::default(), "punktfunk-ps5: threads: {line}");
+}
+
 /// The data directory and the kernel log, for the probe, which needs nothing else.
 pub fn probe_parts() -> (PathBuf, Box<dyn std::io::Write + Send>) {
     (storage().0, Box::new(klog::Klog::default()))
@@ -94,6 +117,7 @@ pub fn probe_parts() -> (PathBuf, Box<dyn std::io::Write + Send>) {
 /// process (the 13.60 trap), and Mesa's environment is set before the instance exists.
 pub fn platform() -> Result<Platform> {
     videodec2::warm_up();
+    keep_off_decoder_cpus();
     let dir = storage();
     let cache = dir.0.join("radv-cache");
     let _ = std::fs::create_dir_all(&cache);

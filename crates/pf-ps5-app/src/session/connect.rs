@@ -183,7 +183,10 @@ impl Negotiated {
         let ten_bit = params.ten_bit_sdr && caps.ten_bit && caps.hevc && codec_pref != CodecPref::H264;
         Self {
             audio_channels,
-            video_caps: if ten_bit { quic::VIDEO_CAP_10BIT } else { 0 },
+            // Multi-slice: Videodec2 splits a picture's slices across its cores, and the host
+            // slices only toward this bit (4 a picture). ProsperoLight asks for 8 and decodes 4K120
+            // HEVC in 6.9 ms (`src/moonlight_stream.cpp:2694,4282`); one slice serializes it.
+            video_caps: quic::VIDEO_CAP_MULTI_SLICE | if ten_bit { quic::VIDEO_CAP_10BIT } else { 0 },
             // Folded from the one codec list so the host's ladder never picks an undecodable lane.
             video_codecs: codecs.iter().fold(0, |set, &pref| set | codec_bit(pref)),
             preferred_codec: codec_bit(codec_pref),

@@ -103,6 +103,7 @@ pub(super) fn spawn(
                     port: target.port,
                     mode,
                     bitrate_kbps: settings.bitrate_kbps,
+                    pyrowave_bpp_x100: settings.pyrowave_bpp_x100(),
                     hdr_enabled: settings.hdr_enabled,
                     ten_bit_sdr: settings.ten_bit_sdr,
                     audio_channels: settings.audio_channels,

@@ -151,6 +151,7 @@ pub(super) fn start(
     identity: &(String, String),
     want: Launch,
     native: Mode,
+    overlay: Option<&pf_client_core::presets::SettingsOverlay>,
 ) -> Result<Started> {
     let state = store.snapshot();
     let known = state
@@ -168,6 +169,20 @@ pub(super) fn start(
         want.launch.as_deref(),
         want.preset.as_deref(),
     );
+    if let Some(overlay) = overlay {
+        settings = overlay.apply(&settings);
+        settings.clamp_to_caps();
+        tracing::info!(
+            "test run: settings for this run codec={} bitrate_kbps={} {}x{}@{} pyrowave_bpp={} hdr={}",
+            settings.codec,
+            settings.bitrate_kbps,
+            settings.width,
+            settings.height,
+            settings.refresh_hz,
+            settings.pyrowave_bpp,
+            settings.hdr_enabled,
+        );
+    }
     // "Automatic" mirrors the pad in hand, which on this console is a DualSense.
     if settings.gamepad_type() == GamepadType::Auto {
         settings.set_gamepad_type(GamepadType::DualSense);

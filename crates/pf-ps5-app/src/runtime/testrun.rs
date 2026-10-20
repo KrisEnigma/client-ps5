@@ -38,6 +38,10 @@ pub struct TestRun {
     /// Seconds into the stream at which to save a frame.
     #[serde(default)]
     pub captures: Vec<u64>,
+    /// Stream settings for this run only, in a profile's sparse form, laid over the ones the
+    /// launch resolves. Nothing is saved, so the next launch streams with the user's settings.
+    #[serde(default)]
+    pub settings: Option<pf_client_core::presets::SettingsOverlay>,
     #[serde(skip)]
     pub bundle: PathBuf,
 }
@@ -206,5 +210,21 @@ mod tests {
             Some(5)
         );
         assert_eq!(run.capture_due(Duration::from_secs(6), Duration::from_secs(7)), None);
+        assert!(run.settings.is_none());
+    }
+
+    #[test]
+    fn a_scenario_file_carries_settings_for_the_run() {
+        let run: TestRun = serde_json::from_str(
+            r#"{"scenario":"stream","host":"10.0.0.2","settings":{"codec":"hevc","bitrate_kbps":60000,"refresh_hz":120}}"#,
+        )
+        .unwrap();
+        let overlay = run.settings.expect("settings");
+        let base = pf_client_core::trust::Settings::default();
+        let applied = overlay.apply(&base);
+        assert_eq!(applied.codec, "hevc");
+        assert_eq!(applied.bitrate_kbps, 60_000);
+        assert_eq!(applied.refresh_hz, 120);
+        assert_eq!(applied.width, base.width);
     }
 }

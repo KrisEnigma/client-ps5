@@ -133,7 +133,8 @@ pub(super) fn run(app: &mut App, notice: Option<String>) -> Result<UiOutcome> {
                         profile,
                     };
                     let what = format!("{title} on {}:{}", want.addr, want.port);
-                    match connect::start(&store, &app.media, &app.identity, want, native) {
+                    let overlay = app.test_run.as_ref().and_then(|run| run.settings.as_ref());
+                    match connect::start(&store, &app.media, &app.identity, want, native, overlay) {
                         Ok(started) => {
                             tracing::info!("console: launching {what}");
                             console.session_phase(SessionPhase::Connecting);

@@ -52,6 +52,7 @@ pub(super) fn run(app: &mut App, notice: Option<String>) -> Result<UiOutcome> {
         gpu_cache_bytes: pf_console_ui::DEFAULT_GPU_CACHE_BYTES,
         screen: None,
         profiles: false,
+        spatial: false,
     };
     let scripted = app.test_run.as_ref().and_then(|run| {
         let host = run.host.as_deref()?;

@@ -186,9 +186,8 @@ impl Negotiated {
         let ten_bit = params.ten_bit_sdr && caps.ten_bit && caps.hevc && codec_pref != CodecPref::H264;
         Self {
             audio_channels,
-            // Multi-slice: Videodec2 splits a picture's slices across its cores, and the host
-            // slices only toward this bit (4 a picture). ProsperoLight asks for 8 and decodes 4K120
-            // HEVC in 6.9 ms (`src/moonlight_stream.cpp:2694,4282`); one slice serializes it.
+            // Multi-slice: Videodec2 spreads a picture's slices across its cores; one slice
+            // serializes it. The host slices only toward this bit; `dial` names the count.
             video_caps: quic::VIDEO_CAP_MULTI_SLICE | if ten_bit { quic::VIDEO_CAP_10BIT } else { 0 },
             // Folded from the one codec list so the host's ladder never picks an undecodable lane.
             video_codecs: codecs.iter().fold(0, |set, &pref| set | codec_bit(pref)),
@@ -207,6 +206,8 @@ fn dial(params: &ConnectParams, negotiated: &Negotiated) -> Result<NativeClient>
         gamepad: params.gamepad_type.to_core(),
         bitrate_kbps: params.bitrate_kbps,
         pyrowave_bpp_x100: params.pyrowave_bpp_x100,
+        // Eight, not the host's four: 4K120 HEVC decodes 0.6-0.8 ms faster and holds 60 Mbit/s.
+        slices: 8,
         video_caps: negotiated.video_caps,
         // Requested only: `AudioPlayer::new` is built from the RESOLVED `client.audio_channels`.
         audio_channels: negotiated.audio_channels,

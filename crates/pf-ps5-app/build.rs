@@ -256,6 +256,9 @@ fn generate_third_party_notices(root: &str) {
 
     let output = lines.join("\n") + "\n";
     let output_path = Path::new(root).join("THIRD-PARTY-NOTICES.txt");
+    if fs::read_to_string(&output_path).is_ok_and(|existing| existing == output) {
+        return;
+    }
     fs::write(&output_path, output).expect("write THIRD-PARTY-NOTICES.txt");
     eprintln!(
         "wrote THIRD-PARTY-NOTICES.txt: {} crates, {} distinct license texts, {} without embedded text",

@@ -6,7 +6,8 @@ expect failures: a failure with its log is a good result.
 
 ## What you need
 
-- **The console:** a PS5 on firmware 13.60 that runs homebrew, with an FTP server on port 2121
+- **The console:** a PS5 that runs homebrew (13.42 is proven; 13.60 is what the sources
+  describe), with an FTP server on port 2121
   and a title loader that launches folders in `/data/homebrew`. A klog server on port 3232 is
   optional and helps with crashes.
 - **A computer** on the same network with [Python 3](https://www.python.org/downloads/),

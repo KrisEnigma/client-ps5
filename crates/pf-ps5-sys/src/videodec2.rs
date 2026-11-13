@@ -13,8 +13,6 @@ pub const RESOURCE_COMPUTE: u32 = 1;
 pub const AVC_HIGH: u32 = 100;
 pub const HEVC_MAIN: u32 = 1;
 pub const HEVC_MAIN10: u32 = 2;
-/// Hosts that reserve five references need a six-deep DPB, or decode fails `OVERSIZE_DECODE`.
-pub const MAX_DPB_FRAMES: i32 = 6;
 pub const DEFAULT_PRIORITY: i32 = 700;
 /// Three physical cores (SMT siblings adjacent): measured best for one decoder.
 pub const DEFAULT_AFFINITY: u64 = 0x3f;

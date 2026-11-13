@@ -7,12 +7,13 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
-use punktfunk_core::client::{AudioPacket, NativeClient};
+use punktfunk_core::client::NativeClient;
 use punktfunk_core::packet::{FLAG_SOF, USER_FLAG_RECOVERY_ANCHOR};
 use punktfunk_core::reanchor::DROP_CREDIT_WINDOW;
 use punktfunk_core::PunktfunkError;
 
 use crate::session::audio::AudioStage;
+use crate::session::pipeline::Opener;
 use crate::session::stage::{SinkResult, VideoStage, WireFrame};
 use crate::session::timeline::{CadenceTrace, Deltas};
 use crate::session::StreamStats;
@@ -62,6 +63,8 @@ impl Tick {
 struct VideoPump {
     client: Arc<NativeClient>,
     stage: VideoStage,
+    /// Opens the decoder for each format the host moves the stream to.
+    opener: Opener,
     stats: Arc<StreamStats>,
     /// Core's shared HUD, held rather than fetched per frame.
     hud: Arc<punktfunk_core::hud::Stats>,
@@ -81,7 +84,13 @@ struct VideoPump {
 }
 
 impl VideoPump {
-    fn new(client: Arc<NativeClient>, stage: VideoStage, stats: Arc<StreamStats>, is_hdr: bool) -> Self {
+    fn new(
+        client: Arc<NativeClient>,
+        stage: VideoStage,
+        opener: Opener,
+        stats: Arc<StreamStats>,
+        is_hdr: bool,
+    ) -> Self {
         let last_dropped_seen = client.frames_dropped();
         // `StreamStats` derives `Default`, and 0 is a legitimate slack reading — so the sentinel
         // has to be written before the first heartbeat, or the overlay shows a fabricated
@@ -91,6 +100,7 @@ impl VideoPump {
         Self {
             client,
             stage,
+            opener,
             stats,
             hud,
             is_hdr,
@@ -107,9 +117,16 @@ impl VideoPump {
         }
     }
 
-    fn run(&mut self, stop: &AtomicBool) {
+    fn run(&mut self, first: Option<punktfunk_core::session::Frame>, stop: &AtomicBool) {
+        if let Some(frame) = first {
+            self.on_frame(&frame);
+        }
         while !stop.load(Ordering::Relaxed) {
             match self.client.next_frame(FRAME_WAIT) {
+                Ok(frame) if frame.new_format.is_some() => {
+                    let frame = self.reformat(frame, stop);
+                    self.on_frame(&frame);
+                }
                 Ok(frame) => self.on_frame(&frame),
                 // The SAME heartbeat as the frame path, not a second consumer of the tick: this
                 // arm used to swallow the fire and print only the idle line, so an idle stretch
@@ -131,6 +148,24 @@ impl VideoPump {
             // The connector matches each 0xCF timing to its frame for the overlay. Drained here
             // so the bounded plane never fills.
             while self.client.next_host_timing(Duration::ZERO).is_ok() {}
+        }
+    }
+
+    /// The host moved the stream to a new format at `frame`. The old decoder closes first, so
+    /// the new one opens with its memory free. Returns the frame that opens the stage's decoder;
+    /// a failed open leaves the stage closed, which ends the session on that frame.
+    fn reformat(&mut self, frame: punktfunk_core::session::Frame, stop: &AtomicBool) -> punktfunk_core::session::Frame {
+        tracing::info!("video: the host changed the stream format — reopening the decoder");
+        self.stage.close_sink();
+        match self.opener.open(&self.client, stop) {
+            Ok((sink, first)) => {
+                self.stage.replace_sink(sink);
+                first.unwrap_or(frame)
+            }
+            Err(e) => {
+                tracing::error!("video decoder did not reopen: {e:#}");
+                frame
+            }
         }
     }
 
@@ -391,52 +426,56 @@ impl VideoPump {
     }
 }
 
-/// The video thread's body: pump until `stop`. Owns all `Arc`s, keeping client and stats alive.
+/// The video thread's body: feed `first`, then pump until `stop`. Owns all `Arc`s, keeping
+/// client and stats alive.
 #[allow(clippy::needless_pass_by_value)]
 pub(super) fn video_pump(
     client: Arc<NativeClient>,
     stage: VideoStage,
+    first: Option<punktfunk_core::session::Frame>,
+    opener: Opener,
     stop: Arc<AtomicBool>,
     stats: Arc<StreamStats>,
     is_hdr: bool,
 ) {
-    VideoPump::new(client, stage, stats, is_hdr).run(&stop);
+    VideoPump::new(client, stage, opener, stats, is_hdr).run(first, &stop);
 }
 
-/// How long an audio drain parks on an empty plane before re-checking `stop`.
-const AUDIO_WAIT: Duration = Duration::from_millis(100);
+/// One audio packet: how long the pump parks on an empty plane, so a quiet wire is judged on the
+/// wire's schedule and concealment drains at the rate the port does.
+const AUDIO_WAIT: Duration = Duration::from_millis(5);
 
-/// Shared body of both audio threads: pull packets, hand each to `play`, exit on `stop` or closed plane.
+/// The audio pump: packets off the transport into [`AudioStage`], which decodes into its sink, and
+/// a concealment tick whenever none came. Exits on `stop` or a closed plane.
 ///
 /// Dedicated thread per core's contract (packets arrive every 5 ms); avoids stalls from
 /// video pump blocking or main-loop rasterizer contention. Pull methods are one-thread-per-plane safe.
-fn audio_drain(client: &NativeClient, stop: &AtomicBool, what: &str, mut play: impl FnMut(&AudioPacket)) {
-    while !stop.load(Ordering::Relaxed) {
-        match client.next_audio(AUDIO_WAIT) {
-            Ok(packet) => play(&packet),
-            Err(PunktfunkError::NoFrame) => {}
-            Err(e) => {
-                tracing::info!("{what} ending: {e:#}");
-                break;
-            }
-        }
-    }
-}
-
-/// The audio pump: packets off the transport into [`AudioStage`], which decodes into its sink.
 pub(super) fn audio_pump(client: &NativeClient, stage: &mut AudioStage, stop: &AtomicBool) {
     let what = stage.sink_name();
     let mut packets: u32 = 0;
     // Consecutive refused packets, logged once per run: a sink that is gone refuses every one,
     // 200 a second, until the session ends.
     let mut failing: u32 = 0;
-    audio_drain(client, stop, what, |packet| {
+    while !stop.load(Ordering::Relaxed) {
+        let packet = match client.next_audio(AUDIO_WAIT) {
+            Ok(packet) => packet,
+            Err(PunktfunkError::NoFrame) => {
+                if let Err(e) = stage.quiet() {
+                    tracing::debug!("audio: concealment refused: {e:#}");
+                }
+                continue;
+            }
+            Err(e) => {
+                tracing::info!("{what} ending: {e:#}");
+                break;
+            }
+        };
         if let Err(e) = stage.play(packet.seq, packet.pts_ns, &packet.data) {
             if failing == 0 {
                 tracing::warn!("audio error (seq {}): {e:#}", packet.seq);
             }
             failing = failing.saturating_add(1);
-            return;
+            continue;
         }
         if failing > 0 {
             tracing::warn!("audio: playing again after {failing} refused packet(s)");
@@ -446,14 +485,18 @@ pub(super) fn audio_pump(client: &NativeClient, stage: &mut AudioStage, stop: &A
         // ~15s, matching the video heartbeat (packets are 5ms each).
         if packets % 3_000 == 0 {
             tracing::debug!(
-                "audio: {what}, depth={}, peak={:.4}",
+                "audio: {what}, depth={}, underruns={}, concealed={}ms, peak={:.4}",
                 stage
                     .depth_ms()
                     .map_or_else(|| "n/a".to_string(), |ms| format!("{ms}ms")),
+                stage
+                    .underruns()
+                    .map_or_else(|| "n/a".to_string(), |count| count.to_string()),
+                stage.concealed_ms(),
                 stage.peak(),
             );
         }
-    });
+    }
 }
 
 /// Spawns the audio thread feeding `stage`'s sink (`MediaPipeline::build`).

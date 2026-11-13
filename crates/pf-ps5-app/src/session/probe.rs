@@ -45,11 +45,10 @@ fn handshake_only(
 
 /// What the host is asked to burst during a speed test, and for how long.
 ///
-/// Chosen against what the answer is used for: the bitrate slider caps at
-/// `core::model::BITRATE_MAX_KBPS` and the recommendation is 70 % of measured, so anything above
-/// ~285 Mbps already clamps. A burst far past capacity mostly measures the access point's drop
-/// policy and starves the host's end-of-burst report, which shares the saturated path.
-/// A wired console may justify more once a bundle shows its ceiling.
+/// Chosen against what the answer is used for: the recommendation is 70 % of measured, for
+/// HEVC and H.264 rates the console decodes far below this. A burst far past capacity mostly
+/// measures the access point's drop policy and starves the host's end-of-burst report, which
+/// shares the saturated path. A wired console may justify more once a bundle shows its ceiling.
 const PROBE_TARGET_KBPS: u32 = 320_000;
 /// A pinned (non-zero) session rate for the probe connect — see the call site: its only
 /// job is to keep `bitrate_kbps == 0` from arming core's own capacity probe against the

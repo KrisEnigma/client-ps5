@@ -32,6 +32,10 @@ export BINDGEN_EXTRA_CLANG_ARGS="--target=x86_64-sie-ps5 -isystem $sdk/target/in
 # Skia: the archive scripts/build-skia.sh produced, never a silent hour-long source build.
 export SKIA_BINARIES_URL="file://$root/.toolchains/skia/{tag}/skia-binaries-{key}.tar.gz"
 export PF_MESA_PIN="${PS5_MESA_REV:0:12}" PF_CORE_REV="${PUNKTFUNK_REV:0:9}"
+# The console maps code execute-only, and aws-lc's s2n-bignum assembly keeps its tables in
+# .text (x25519 faulted reading one), so aws-lc's C calls none of its assembly. Not
+# AWS_LC_SYS_NO_ASM: its CMake build allows that at opt-level 0 only.
+export AWS_LC_SYS_CFLAGS_x86_64_sie_ps5="$CFLAGS_x86_64_sie_ps5 -DOPENSSL_NO_ASM"
 
 exec cargo "+$RUST_NIGHTLY" "$cmd" --release -Z build-std=std,panic_abort -Z json-target-spec \
     --target "$root/targets/x86_64-sie-ps5.json" -p "${PS5_PACKAGE:-pf-ps5-title}" "${features[@]}" "$@"

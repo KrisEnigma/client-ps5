@@ -33,7 +33,7 @@ pub extern "C" fn main(_argc: c_int, _argv: *const *const c_char) -> c_int {
         let exchange = pf_ps5_app::runtime::testrun::exchange_dir();
         let ctx = pf_ps5_probe::Ctx {
             config: pf_ps5_probe::config(&exchange),
-            dir: dir.clone(),
+            dir,
         };
         let failed = match pf_ps5_probe::Out::new(&exchange, Some(klog)) {
             Ok(mut out) => pf_ps5_probe::run(&ctx, &mut out),

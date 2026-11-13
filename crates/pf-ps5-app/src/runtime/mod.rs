@@ -64,7 +64,7 @@ enum StreamOutcome {
     Quit(Option<ExitPlan>),
 }
 
-/// Same proven-safe probe target as the connection test, and the client's one bitrate ceiling.
+/// The startup link probe's burst: the connection test's proven-safe target.
 const ABR_PROBE_KBPS: u32 = 320_000;
 
 /// The two automatic-bitrate knobs punktfunk-core reads from the environment. Set before any
@@ -92,12 +92,13 @@ pub fn run(platform: Platform) -> ! {
     let flush = crate::logger::init_subscriber(&crate::services::paths::logs_dir(), log).ok();
     install_panic_hook();
     tracing::info!(
-        "punktfunk-ps5 {} on {} ({} firmware {}), gpu {}",
+        "punktfunk-ps5 {} on {} ({} firmware {}), gpu {}, ui {}",
         crate::core::build_id(),
         device.platform,
         device.model,
         device.firmware,
         device.gpu,
+        device.ui,
     );
     crate::core::caps::install(video.caps());
     // ureq's agents resolve their provider from the process default and panic without one.

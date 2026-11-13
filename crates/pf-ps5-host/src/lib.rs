@@ -236,7 +236,7 @@ fn sample_from_json(v: &serde_json::Value) -> pf_ps5_app::platform::PadSample {
     }
 }
 
-fn display(opts: &Options) -> Result<(Box<dyn Display>, HostVideo, String)> {
+fn display(opts: &Options) -> Result<(Box<dyn Display>, HostVideo, String, String)> {
     let fed = Arc::new(AtomicU64::new(0));
     #[cfg(target_os = "linux")]
     {
@@ -257,6 +257,7 @@ fn display(opts: &Options) -> Result<(Box<dyn Display>, HostVideo, String)> {
                 let slot = Arc::new(pf_ps5_vk::VideoSlot::default());
                 let presenter = pf_ps5_vk::Presenter::new(dev.clone(), slot.clone())?;
                 let gpu = dev.name.clone();
+                let ui = presenter.ui();
                 return Ok((
                     Box::new(presenter),
                     HostVideo {
@@ -264,6 +265,7 @@ fn display(opts: &Options) -> Result<(Box<dyn Display>, HostVideo, String)> {
                         fed,
                     },
                     gpu,
+                    ui,
                 ));
             }
             Err(e) => tracing::warn!("no Vulkan here, rastering on the CPU: {e:#}"),
@@ -277,13 +279,14 @@ fn display(opts: &Options) -> Result<(Box<dyn Display>, HostVideo, String)> {
             fed,
         },
         "CPU raster".into(),
+        format!("CPU raster {}x{}", opts.width, opts.height),
     ))
 }
 
 /// The host platform.
 pub fn platform(opts: &Options) -> Result<Platform> {
     std::fs::create_dir_all(&opts.data_dir).with_context(|| format!("create {}", opts.data_dir.display()))?;
-    let (display, video, gpu) = display(opts)?;
+    let (display, video, gpu, ui) = display(opts)?;
     Ok(Platform {
         display,
         video: Arc::new(video),
@@ -299,6 +302,7 @@ pub fn platform(opts: &Options) -> Result<Platform> {
             model: std::env::consts::OS.into(),
             firmware: String::new(),
             gpu,
+            ui,
         },
     })
 }

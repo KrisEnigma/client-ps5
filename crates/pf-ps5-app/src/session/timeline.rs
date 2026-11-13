@@ -152,6 +152,13 @@ impl Pacing {
         self.map_clock_ns = None;
     }
 
+    /// Re-anchor on a new decoder: its clock counts from its own open and holds none of the
+    /// old stamps, so the floor goes too.
+    pub fn restart(&mut self) {
+        self.reset();
+        self.last_base_ns = 0;
+    }
+
     pub fn health(&self) -> PacingHealth {
         let h = self.clock.health();
         PacingHealth {

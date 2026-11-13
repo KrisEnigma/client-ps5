@@ -1,19 +1,39 @@
-# punktfunk for PlayStation 5
+<div align="center">
 
-A homebrew client that streams games and desktops from a [punktfunk](https://docs.punktfunk.unom.io)
-host to a PS5.
+<img src="packaging/icon_large.png" alt="Punktfunk" width="130">
 
-> **Experimental.** Nothing has run on a console yet. Builds go to testers, not to a release page.
+<br>
+<br>
 
-## What it is built to do
+[![CI](https://github.com/punktfunk/client-ps5/actions/workflows/ci.yml/badge.svg)](https://github.com/punktfunk/client-ps5/actions/workflows/ci.yml)
+[![License](https://img.shields.io/badge/license-MIT%2FApache--2.0-d2c9fb)](#licence)
+
+**Native PlayStation 5 client for [Punktfunk](https://git.unom.io/unom/punktfunk) — low-latency desktop & game streaming.**
+
+</div>
+
+---
+
+A homebrew title that streams games and desktops from a [Punktfunk](https://docs.punktfunk.unom.io)
+host to a PS5, built on the upstream `punktfunk-core` crate (a pinned git dependency — see
+`Cargo.toml`) and the shared console UI. This repo is only the PS5-specific client: the console's
+platform, Videodec2, a Vulkan presenter on a statically linked RADV, and the title packaging.
+
+> **Experimental.** It streams on a tester's PS5 (firmware 13.42); `docs/NOTES.md` lists what each
+> round proved. Builds go to testers, not to a release page.
+
+## Features
+
+What it is built to do:
 
 - 3840×2160 at 59.94 or 119.88 Hz: H.264 and HEVC on the console's decoder, PyroWave on its GPU.
-- The punktfunk console UI: hosts, pairing, game libraries and settings, driven by the controller.
+- HDR10 when the display shows HDR and the host sends it.
+- The Punktfunk console UI: hosts, pairing, game libraries and settings, driven by the controller.
 - DualSense rumble, adaptive triggers and light bar, one controller per signed-in user.
 - Stereo sound.
 
-Not yet: HDR, surround sound, DualSense haptics, keyboard and mouse, VRR, and host names (enter
-an IP address).
+Not yet: surround sound, DualSense haptics, keyboard and mouse, VRR, and host names (enter an IP
+address).
 
 ## Test it on a console
 
@@ -70,6 +90,10 @@ Read [`AGENTS.md`](AGENTS.md) before changing code: layering, commands and invar
   facts the code relies on.
 - [`docs/plan.md`](docs/plan.md): the plan of record.
 - [`docs/pins.md`](docs/pins.md): every pinned dependency and how it moves.
+
+## Use of AI
+
+This project uses AI for writing code. The rules the agents follow are in [AGENTS.md](AGENTS.md).
 
 ## Licence
 
